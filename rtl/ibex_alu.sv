@@ -2,6 +2,8 @@
 // Copyright 2018 ETH Zurich and University of Bologna, see also CREDITS.md.
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
+// Modified 2026 by Niels Wieser, TU Darmstadt:
+// countermeasures against micro-architectural leakage.
 
 /**
  * Arithmetic logic unit
@@ -9,7 +11,10 @@
 module ibex_alu #(
   parameter ibex_pkg::rv32b_e RV32B = ibex_pkg::RV32BNone
 ) (
+  input  logic              clk_i, // Only used for precharging sensitive values 
+  input  logic              rst_ni,
   input  ibex_pkg::alu_op_e operator_i,
+  input  logic              can_skip_add_i,
   input  logic [31:0]       operand_a_i,
   input  logic [31:0]       operand_b_i,
 
@@ -32,6 +37,55 @@ module ibex_alu #(
   output logic              is_equal_result_o
 );
   import ibex_pkg::*;
+
+  // Blinds for unused operations:  
+  typedef struct packed {
+    logic ops_binary;     
+    logic ops_adder;      
+    logic ops_shifter;    
+    logic ops_shuffle;    
+    logic ops_crossbar;   
+    logic ops_comparison; 
+    logic ops_minmax;     
+    logic ops_bitcnt;     
+    logic ops_pack;       
+    logic ops_extend;     
+    logic ops_multicycle; 
+    logic ops_bitmanip;   
+    logic ops_general;    
+    logic ops_bitfield;   
+    logic ops_clm;  
+    // Result Mux Selection
+    logic sel_binary;
+    logic sel_adder;
+    logic sel_shifter;
+    logic sel_shuffle;
+    logic sel_crossbar;
+    logic sel_comparison;
+    logic sel_minmax;
+    logic sel_bitcnt;
+    logic sel_pack;
+    logic sel_extend;
+    logic sel_multicycle;
+    logic sel_bitmanip;
+    logic sel_general;
+    logic sel_bitfield;
+    logic sel_clm;
+    logic sel_adder_mul;
+    logic sel_adder_std;
+    logic sel_adder_neg;
+    logic sel_adder_a_sh1;
+    logic sel_adder_a_sh2;
+    logic sel_adder_a_sh3;
+    logic sel_adder_a_std;
+  } operator_mux_out;
+
+  operator_mux_out op_raw, op_pipelined;
+
+
+
+
+
 
   logic [31:0] operand_a_rev;
   logic [32:0] operand_b_neg;
@@ -80,26 +134,44 @@ module ibex_alu #(
     endcase
   end
 
+
+  logic [31:0] adder_op_a;
+  logic [31:0] adder_op_b;
+  AND_gate #(.N(32)) u_adder_op_a_and (.A1(operand_a_i), .A2({32{op_pipelined.ops_adder}}), .ZN(adder_op_a));
+  AND_gate #(.N(32)) u_adder_op_b_and (.A1(operand_b_i), .A2({32{op_pipelined.ops_adder}}), .ZN(adder_op_b));
+
+
   // prepare operand a
-  always_comb begin
-    unique case (1'b1)
-      multdiv_sel_i:     adder_in_a = multdiv_operand_a_i;
-      adder_op_a_shift1: adder_in_a = {operand_a_i[30:0],2'b01};
-      adder_op_a_shift2: adder_in_a = {operand_a_i[29:0],3'b001};
-      adder_op_a_shift3: adder_in_a = {operand_a_i[28:0],4'b0001};
-      default:           adder_in_a = {operand_a_i,1'b1};
-    endcase
-  end
+  logic [32:0] adder_in_a_mul;
+  logic [32:0] adder_in_a_sh1;
+  logic [32:0] adder_in_a_sh2;
+  logic [32:0] adder_in_a_sh3;
+  logic [32:0] adder_in_a_std;
+
+  AND_gate #(.N(33)) u_adder_op_a_mul_and (.A1(multdiv_operand_a_i), .A2({33{op_pipelined.sel_adder_mul}}), .ZN(adder_in_a_mul));
+  AND_gate #(.N(33)) u_adder_op_a_sh1_and (.A1({adder_op_a[30:0],2'b01}), .A2({33{op_pipelined.sel_adder_a_sh1}}), .ZN(adder_in_a_sh1));
+  AND_gate #(.N(33)) u_adder_op_a_sh2_and (.A1({adder_op_a[29:0],3'b001}), .A2({33{op_pipelined.sel_adder_a_sh2}}), .ZN(adder_in_a_sh2));
+  AND_gate #(.N(33)) u_adder_op_a_sh3_and (.A1({adder_op_a[28:0],4'b0001}), .A2({33{op_pipelined.sel_adder_a_sh3}}), .ZN(adder_in_a_sh3));
+  AND_gate #(.N(33)) u_adder_op_a_std_and (.A1({adder_op_a,1'b1}), .A2({33{op_pipelined.sel_adder_a_std}}), .ZN(adder_in_a_std));
+
+  assign adder_in_a = adder_in_a_std |
+                      adder_in_a_mul |
+                      adder_in_a_sh1 |
+                      adder_in_a_sh2 |
+                      adder_in_a_sh3;
 
   // prepare operand b
-  assign operand_b_neg = {operand_b_i,1'b0} ^ {33{1'b1}};
-  always_comb begin
-    unique case (1'b1)
-      multdiv_sel_i:     adder_in_b = multdiv_operand_b_i;
-      adder_op_b_negate: adder_in_b = operand_b_neg;
-      default:           adder_in_b = {operand_b_i, 1'b0};
-    endcase
-  end
+  logic [32:0] adder_in_b_mul;
+  logic [32:0] adder_in_b_neg;
+  logic [32:0] adder_in_b_std;
+  AND_gate #(.N(33)) u_adder_op_b_mul_and (.A1(multdiv_operand_b_i), .A2({33{op_pipelined.sel_adder_mul}}), .ZN(adder_in_b_mul));
+  AND_gate #(.N(33)) u_adder_op_b_neg_and (.A1(operand_b_neg), .A2({33{op_pipelined.sel_adder_neg}}), .ZN(adder_in_b_neg));
+  AND_gate #(.N(33)) u_adder_op_b_std_and (.A1({adder_op_b[31:0], 1'b0}), .A2({33{op_pipelined.sel_adder_std}}), .ZN(adder_in_b_std));
+
+  assign adder_in_b = adder_in_b_std |
+                      adder_in_b_mul |
+                      adder_in_b_neg;
+
 
   // actual adder
   assign adder_result_ext_o = $unsigned(adder_in_a) + $unsigned(adder_in_b);
@@ -115,6 +187,12 @@ module ibex_alu #(
   logic is_equal;
   logic is_greater_equal;  // handles both signed and unsigned forms
   logic cmp_signed;
+
+  logic [31:0] comparison_op_a;
+  logic [31:0] comparison_op_b;
+
+  AND_gate #(.N(32)) u_comparison_op_a_and (.A1(operand_a_i), .A2({32{op_pipelined.ops_comparison}}), .ZN(comparison_op_a));
+  AND_gate #(.N(32)) u_comparison_op_b_and (.A1(operand_b_i), .A2({32{op_pipelined.ops_comparison}}), .ZN(comparison_op_b));
 
   always_comb begin
     unique case (operator_i)
@@ -134,24 +212,13 @@ module ibex_alu #(
 
   // Is greater equal
   always_comb begin
-    if ((operand_a_i[31] ^ operand_b_i[31]) == 1'b0) begin
+    if ((comparison_op_a[31] ^ comparison_op_b[31]) == 1'b0) begin
       is_greater_equal = (adder_result[31] == 1'b0);
     end else begin
-      is_greater_equal = operand_a_i[31] ^ (cmp_signed);
+      is_greater_equal = comparison_op_a[31] ^ (cmp_signed);
     end
   end
 
-  // GTE unsigned:
-  // (a[31] == 1 && b[31] == 1) => adder_result[31] == 0
-  // (a[31] == 0 && b[31] == 0) => adder_result[31] == 0
-  // (a[31] == 1 && b[31] == 0) => 1
-  // (a[31] == 0 && b[31] == 1) => 0
-
-  // GTE signed:
-  // (a[31] == 1 && b[31] == 1) => adder_result[31] == 0
-  // (a[31] == 0 && b[31] == 0) => adder_result[31] == 0
-  // (a[31] == 1 && b[31] == 0) => 0
-  // (a[31] == 0 && b[31] == 1) => 1
 
   // generate comparison result
   logic cmp_result;
@@ -248,6 +315,8 @@ module ibex_alu #(
   logic [5:0] shift_amt_compl; // complementary shift amount (32 - shift_amt)
 
   logic        [31:0] shift_operand;
+  logic        [31:0] shift_operand_a;
+  logic        [31:0] shift_operand_b;
   logic signed [32:0] shift_result_ext_signed;
   logic        [32:0] shift_result_ext;
   logic               unused_shift_result_ext;
@@ -262,30 +331,44 @@ module ibex_alu #(
   logic [31:0] bfp_mask_rev;
   logic [31:0] bfp_result;
 
+  logic [31:0] bfp_op_a;
+  logic [31:0] bfp_op_b;
+
+  AND_gate #(.N(32)) u_bfp_op_a_and (.A1(operand_a_i), .A2({32{op_pipelined.ops_bitfield}}), .ZN(bfp_op_a));
+  AND_gate #(.N(32)) u_bfp_op_b_and (.A1(operand_b_i), .A2({32{op_pipelined.ops_bitfield}}), .ZN(bfp_op_b));
+
+  logic [31:0] shift_op_a;
+  logic [31:0] shift_op_b;
+  logic [31:0] shift_op_a_rev;
+
+  AND_gate #(.N(32)) u_shift_op_a_and (.A1(operand_a_i), .A2({32{op_pipelined.ops_shifter}}), .ZN(shift_op_a));
+  AND_gate #(.N(32)) u_shift_op_b_and (.A1(operand_b_i), .A2({32{op_pipelined.ops_shifter}}), .ZN(shift_op_b));
+  AND_gate #(.N(32)) u_shift_op_a_rev_and (.A1(operand_a_rev), .A2({32{op_pipelined.ops_shifter}}), .ZN(shift_op_a_rev));
+
   // bfp: shares the shifter structure to compute bfp_mask << bfp_off
   assign bfp_op = (RV32B != RV32BNone) ? (operator_i == ALU_BFP) : 1'b0;
-  assign bfp_len = {~(|operand_b_i[27:24]), operand_b_i[27:24]}; // len = 0 encodes for len = 16
-  assign bfp_off = operand_b_i[20:16];
+  assign bfp_len = {~(|shift_op_b[27:24]), shift_op_b[27:24]}; // len = 0 encodes for len = 16
+  assign bfp_off = shift_op_b[20:16];
   assign bfp_mask = (RV32B != RV32BNone) ? ~(32'hffff_ffff << bfp_len) : '0;
   for (genvar i = 0; i < 32; i++) begin : gen_rev_bfp_mask
     assign bfp_mask_rev[i] = bfp_mask[31-i];
   end
 
   assign bfp_result =(RV32B != RV32BNone) ?
-      (~shift_result & operand_a_i) | ((operand_b_i & bfp_mask) << bfp_off) : '0;
+      (~shift_result & bfp_op_a) | ((bfp_op_b & bfp_mask) << bfp_off) : '0;
 
   // bit shift_amt[5]: word swap bit: only considered for FSL/FSR.
   // if set, reverse operations in first and second cycle.
-  assign shift_amt[5] = operand_b_i[5] & shift_funnel;
-  assign shift_amt_compl = 32 - operand_b_i[4:0];
+  assign shift_amt[5] = shift_op_b[5] & shift_funnel;
+  assign shift_amt_compl = 32 - shift_op_b[4:0];
 
   always_comb begin
     if (bfp_op) begin
       shift_amt[4:0] = bfp_off;  // length field of bfp control word
     end else begin
       shift_amt[4:0] = instr_first_cycle_i ?
-          (operand_b_i[5] && shift_funnel ? shift_amt_compl[4:0] : operand_b_i[4:0]) :
-          (operand_b_i[5] && shift_funnel ? operand_b_i[4:0] : shift_amt_compl[4:0]);
+          (shift_op_b[5] && shift_funnel ? shift_amt_compl[4:0] : shift_op_b[4:0]) :
+          (shift_op_b[5] && shift_funnel ? shift_op_b[4:0] : shift_amt_compl[4:0]);
     end
   end
 
@@ -330,12 +413,12 @@ module ibex_alu #(
     // select shifter input
     // for bfp, sbmode and shift_left the corresponding bit-reversed input is chosen.
     if (RV32B == RV32BNone) begin
-      shift_operand = shift_left ? operand_a_rev : operand_a_i;
+      shift_operand = shift_left ? shift_op_a_rev : shift_op_a;
     end else begin
       unique case (1'b1)
         bfp_op:       shift_operand = bfp_mask_rev;
         shift_sbmode: shift_operand = 32'h8000_0000;
-        default:      shift_operand = shift_left ? operand_a_rev : operand_a_i;
+        default:      shift_operand = shift_left ? shift_op_a_rev : shift_op_a;
       endcase
     end
 
@@ -365,6 +448,7 @@ module ibex_alu #(
   logic [31:0] bwlogic_and_result;
   logic [31:0] bwlogic_xor_result;
   logic [31:0] bwlogic_result;
+  logic [31:0] bwlogic_op_a, bwlogic_op_b;
 
   logic bwlogic_op_b_negate;
 
@@ -379,11 +463,16 @@ module ibex_alu #(
     endcase
   end
 
+  assign operand_b_neg = {operand_b_i,1'b0} ^ {33{1'b1}};
   assign bwlogic_operand_b = bwlogic_op_b_negate ? operand_b_neg[32:1] : operand_b_i;
 
-  assign bwlogic_or_result  = operand_a_i | bwlogic_operand_b;
-  assign bwlogic_and_result = operand_a_i & bwlogic_operand_b;
-  assign bwlogic_xor_result = operand_a_i ^ bwlogic_operand_b;
+  AND_gate #(.N(32)) u_bwlogic_op_a_and (.A1(operand_a_i), .A2({32{op_pipelined.ops_binary}}), .ZN(bwlogic_op_a));
+  AND_gate #(.N(32)) u_bwlogic_op_b_and (.A1(bwlogic_operand_b), .A2({32{op_pipelined.ops_binary}}), .ZN(bwlogic_op_b));
+
+
+  assign bwlogic_or_result  = bwlogic_op_a | bwlogic_op_b;
+  assign bwlogic_and_result = bwlogic_op_a & bwlogic_op_b;
+  assign bwlogic_xor_result = bwlogic_op_a ^ bwlogic_op_b;
 
   assign bwlogic_or  = (operator_i == ALU_OR)  | (operator_i == ALU_ORN);
   assign bwlogic_and = (operator_i == ALU_AND) | (operator_i == ALU_ANDN);
@@ -431,6 +520,10 @@ module ibex_alu #(
     logic [31:0] bitcnt_partial_lsb_d;
     logic [31:0] bitcnt_partial_msb_d;
 
+    logic [31:0] bitcnt_op_a, bitcnt_op_b;
+    AND_gate #(.N(32)) u_bitcnt_op_a_and (.A1(operand_a_i), .A2({32{op_pipelined.ops_bitcnt}}), .ZN(bitcnt_op_a));
+    AND_gate #(.N(32)) u_bitcnt_op_b_and (.A1(operand_b_i), .A2({32{op_pipelined.ops_bitcnt}}), .ZN(bitcnt_op_b));
+
 
     assign bitcnt_ctz    = operator_i == ALU_CTZ;
     assign bitcnt_clz    = operator_i == ALU_CLZ;
@@ -441,25 +534,31 @@ module ibex_alu #(
     // The bit mask is generated by spreading the lowest-order set bit in the operand to all
     // higher order bits. The resulting mask is inverted to cover the lowest order zeros. In order
     // to create the bit mask for leading zeros, the input operand needs to be reversed.
-    assign bitcnt_mask_op = bitcnt_clz ? operand_a_rev : operand_a_i;
+    logic [31:0] bitcnt_op_a_rev;
+    for (genvar k = 0; k < 32; k++) begin : gen_rev_bitcnt_op_a
+      assign bitcnt_op_a_rev[k] = bitcnt_op_a[31-k];
+    end
+    assign bitcnt_mask_op = bitcnt_clz ? bitcnt_op_a_rev : bitcnt_op_a;
+
+    logic [31:0] bitcnt_bit_mask_pre;
+    AND_gate #(.N(32)) u_bitcnt_bit_mask_and (.A1(~bitcnt_bit_mask_pre), .A2({32{op_pipelined.ops_bitcnt}}), .ZN(bitcnt_bit_mask));
 
     always_comb begin
-      bitcnt_bit_mask = bitcnt_mask_op;
-      bitcnt_bit_mask |= bitcnt_bit_mask << 1;
-      bitcnt_bit_mask |= bitcnt_bit_mask << 2;
-      bitcnt_bit_mask |= bitcnt_bit_mask << 4;
-      bitcnt_bit_mask |= bitcnt_bit_mask << 8;
-      bitcnt_bit_mask |= bitcnt_bit_mask << 16;
-      bitcnt_bit_mask = ~bitcnt_bit_mask;
+      bitcnt_bit_mask_pre = bitcnt_mask_op;
+      bitcnt_bit_mask_pre |= bitcnt_bit_mask_pre << 1;
+      bitcnt_bit_mask_pre |= bitcnt_bit_mask_pre << 2;
+      bitcnt_bit_mask_pre |= bitcnt_bit_mask_pre << 4;
+      bitcnt_bit_mask_pre |= bitcnt_bit_mask_pre << 8;
+      bitcnt_bit_mask_pre |= bitcnt_bit_mask_pre << 16;
     end
 
     assign zbe_op = (operator_i == ALU_BCOMPRESS) | (operator_i == ALU_BDECOMPRESS);
 
     always_comb begin
       unique case (1'b1)
-        zbe_op:      bitcnt_bits = operand_b_i;
+        zbe_op:      bitcnt_bits = bitcnt_op_b;
         bitcnt_cz:   bitcnt_bits = bitcnt_bit_mask & ~bitcnt_mask_op; // clz / ctz
-        default:     bitcnt_bits = operand_a_i; // cpop
+        default:     bitcnt_bits = bitcnt_op_a; // cpop
       endcase
     end
 
@@ -549,7 +648,11 @@ module ibex_alu #(
     // Min / Max //
     ///////////////
 
-    assign minmax_result = cmp_result ? operand_a_i : operand_b_i;
+    logic [31:0] minmax_op_a, minmax_op_b;
+    AND_gate #(.N(32)) u_minmax_op_a_and (.A1(operand_a_i), .A2({32{op_pipelined.ops_minmax}}), .ZN(minmax_op_a));
+    AND_gate #(.N(32)) u_minmax_op_b_and (.A1(operand_b_i), .A2({32{op_pipelined.ops_minmax}}), .ZN(minmax_op_b));
+
+    assign minmax_result = cmp_result ? minmax_op_a : minmax_op_b;
 
     //////////
     // Pack //
@@ -560,11 +663,15 @@ module ibex_alu #(
     assign packu = operator_i == ALU_PACKU;
     assign packh = operator_i == ALU_PACKH;
 
+    logic [31:0] pack_op_a, pack_op_b;
+    AND_gate #(.N(32)) u_pack_op_a_and (.A1(operand_a_i), .A2({32{op_pipelined.ops_pack}}), .ZN(pack_op_a));
+    AND_gate #(.N(32)) u_pack_op_b_and (.A1(operand_b_i), .A2({32{op_pipelined.ops_pack}}), .ZN(pack_op_b));
+
     always_comb begin
       unique case (1'b1)
-        packu:   pack_result = {operand_b_i[31:16], operand_a_i[31:16]};
-        packh:   pack_result = {16'h0, operand_b_i[7:0], operand_a_i[7:0]};
-        default: pack_result = {operand_b_i[15:0], operand_a_i[15:0]};
+        packu:   pack_result = {pack_op_b[31:16], pack_op_a[31:16]};
+        packh:   pack_result = {16'h0, pack_op_b[7:0], pack_op_a[7:0]};
+        default: pack_result = {pack_op_b[15:0], pack_op_a[15:0]};
       endcase
     end
 
@@ -572,19 +679,27 @@ module ibex_alu #(
     // Sext //
     //////////
 
+    logic [31:0] sext_op_a;
+    AND_gate #(.N(32)) u_sext_op_a_and (.A1(operand_a_i), .A2({32{op_pipelined.ops_extend}}), .ZN(sext_op_a));
+
     assign sext_result = (operator_i == ALU_SEXTB) ?
-        { {24{operand_a_i[7]}}, operand_a_i[7:0]} : { {16{operand_a_i[15]}}, operand_a_i[15:0]};
+        { {24{sext_op_a[7]}}, sext_op_a[7:0]} : { {16{sext_op_a[15]}}, sext_op_a[15:0]};
 
     /////////////////////////////
     // Single-bit Instructions //
     /////////////////////////////
 
+    logic [31:0] singlebit_op_a;
+    logic [31:0] singlebit_op_sh;
+    AND_gate #(.N(32)) u_singlebit_op_a_and (.A1(operand_a_i), .A2({32{op_pipelined.ops_bitmanip}}), .ZN(singlebit_op_a));
+    AND_gate #(.N(32)) u_singlebit_op_sh_and (.A1(shift_result), .A2({32{op_pipelined.ops_bitmanip}}), .ZN(singlebit_op_sh));
+
     always_comb begin
       unique case (operator_i)
-        ALU_BSET: singlebit_result = operand_a_i | shift_result;
-        ALU_BCLR: singlebit_result = operand_a_i & ~shift_result;
-        ALU_BINV: singlebit_result = operand_a_i ^ shift_result;
-        default:  singlebit_result = {31'h0, shift_result[0]}; // ALU_BEXT
+        ALU_BSET: singlebit_result = singlebit_op_a | singlebit_op_sh;
+        ALU_BCLR: singlebit_result = singlebit_op_a & ~singlebit_op_sh;
+        ALU_BINV: singlebit_result = singlebit_op_a ^ singlebit_op_sh;
+        default:  singlebit_result = {31'h0, singlebit_op_sh[0]}; // ALU_BEXT
       endcase
     end
 
@@ -599,6 +714,9 @@ module ibex_alu #(
     logic [4:0] zbp_shift_amt;
     logic gorc_op;
 
+    logic [31:0] rev_op_a;
+    AND_gate #(.N(32)) u_rev_op_a_and (.A1(operand_a_rev), .A2({32{op_pipelined.ops_general}}), .ZN(rev_op_a));
+
     assign gorc_op = (operator_i == ALU_GORC);
     assign zbp_shift_amt[2:0] =
         (RV32B == RV32BOTEarlGrey || RV32B == RV32BFull) ? shift_amt[2:0] : {3{shift_amt[0]}};
@@ -606,7 +724,7 @@ module ibex_alu #(
         (RV32B == RV32BOTEarlGrey || RV32B == RV32BFull) ? shift_amt[4:3] : {2{shift_amt[3]}};
 
     always_comb begin
-      rev_result = operand_a_i;
+      rev_result = rev_op_a;
 
       if (zbp_shift_amt[0]) begin
         rev_result = (gorc_op ? rev_result : 32'h0)       |
@@ -671,8 +789,11 @@ module ibex_alu #(
 
       logic [3:0] shuffle_mode;
 
+      logic [31:0] shuffle_op_a;
+      AND_gate #(.N(32)) u_shuffle_op_a_and (.A1(operand_a_i), .A2({32{op_pipelined.ops_shuffle}}), .ZN(shuffle_op_a));
+
       always_comb begin
-        shuffle_result = operand_a_i;
+        shuffle_result = shuffle_op_a;
 
         if (shuffle_flip) begin
           shuffle_mode[3] = shift_amt[0];
@@ -736,6 +857,13 @@ module ibex_alu #(
       // parallel 4-bit-wide, 8-input crossbars. Basically, we permute the 8 nibbles of operand_a_i
       // based on operand_b_i.
 
+      logic [31:0] crossbar_op_a;
+      logic [31:0] crossbar_op_b;
+      AND_gate #(.N(32)) u_cross_op_a_and (.A1(operand_a_i), .A2({32{op_pipelined.ops_crossbar}}), .ZN(crossbar_op_a));
+      AND_gate #(.N(32)) u_cross_op_b_and (.A1(operand_b_i), .A2({32{op_pipelined.ops_crossbar}}), .ZN(crossbar_op_b));
+
+
+
       // Generate selector indices and valid signals.
       // - sel_n[x] indicates which nibble of operand_a_i is selected for output nibble x.
       // - vld_n[x] indicates if the selection is valid.
@@ -750,24 +878,24 @@ module ibex_alu #(
       // sel_n bit mask: 32'b0111_0111_0111_0111_0111_0111_0111_0111
       // vld_n bit mask: 32'b1000_1000_1000_1000_1000_1000_1000_1000
       for (genvar i = 0; i < 8; i++) begin : gen_sel_vld_n
-        assign sel_n[i] =   operand_b_i[i*4     +: 3];
-        assign vld_n[i] = ~|operand_b_i[i*4 + 3 +: 1];
+        assign sel_n[i] =   crossbar_op_b[i*4     +: 3];
+        assign vld_n[i] = ~|crossbar_op_b[i*4 + 3 +: 1];
       end
 
       // Per byte, 2 bits are needed for the selection. Other bits must be zero.
       // sel_b bit mask: 32'b0000_0011_0000_0011_0000_0011_0000_0011
       // vld_b bit mask: 32'b1111_1100_1111_1100_1111_1100_1111_1100
       for (genvar i = 0; i < 4; i++) begin : gen_sel_vld_b
-        assign sel_b[i] =   operand_b_i[i*8     +: 2];
-        assign vld_b[i] = ~|operand_b_i[i*8 + 2 +: 6];
+        assign sel_b[i] =   crossbar_op_b[i*8     +: 2];
+        assign vld_b[i] = ~|crossbar_op_b[i*8 + 2 +: 6];
       end
 
       // Per half word, 1 bit is needed for the selection only. All other bits must be zero.
       // sel_h bit mask: 32'b0000_0000_0000_0001_0000_0000_0000_0001
       // vld_h bit mask: 32'b1111_1111_1111_1110_1111_1111_1111_1110
       for (genvar i = 0; i < 2; i++) begin : gen_sel_vld_h
-        assign sel_h[i] =   operand_b_i[i*16     +: 1];
-        assign vld_h[i] = ~|operand_b_i[i*16 + 1 +: 15];
+        assign sel_h[i] =   crossbar_op_b[i*16     +: 1];
+        assign vld_h[i] = ~|crossbar_op_b[i*16 + 1 +: 15];
       end
 
       // Convert selector indices and valid signals to control the nibble-based
@@ -813,7 +941,7 @@ module ibex_alu #(
       // The actual nibble-based crossbar logic.
       logic [7:0][3:0] val_n;
       logic [7:0][3:0] xperm_n;
-      assign val_n = operand_a_i;
+      assign val_n = crossbar_op_a;
       for (genvar i = 0; i < 8; i++) begin : gen_xperm_n
         assign xperm_n[i] = vld[i] ? val_n[sel[i]] : '0;
       end
@@ -893,9 +1021,12 @@ module ibex_alu #(
 
       logic [31:0] clmul_result_raw;
 
+      logic [31:0] rev_op_b;
       for (genvar i = 0; i < 32; i++) begin : gen_rev_operand_b
         assign operand_b_rev[i] = operand_b_i[31-i];
       end
+      AND_gate #(.N(32)) u_rev_op_b_and (.A1(operand_b_rev), .A2({32{op_pipelined.ops_general}}), .ZN(rev_op_b));
+
 
       assign clmul_rmode = operator_i == ALU_CLMULR;
       assign clmul_hmode = operator_i == ALU_CLMULH;
@@ -929,24 +1060,39 @@ module ibex_alu #(
       assign crc_poly   = crc_cpoly ? CRC32C_POLYNOMIAL : CRC32_POLYNOMIAL;
       assign crc_mu_rev = crc_cpoly ? CRC32C_MU_REV : CRC32_MU_REV;
 
+
+
+      logic [31:0] crc_op_a;
+      AND_gate #(.N(32)) u_crc_op_a_blinded_and (.A1(clmul_op_a), .A2({32{op_pipelined.ops_clm}}), .ZN(crc_op_a));
+
       always_comb begin
         unique case (1'b1)
-          crc_bmode: crc_operand = {operand_a_i[7:0], 24'h0};
-          crc_hmode: crc_operand = {operand_a_i[15:0], 16'h0};
-          default:   crc_operand = operand_a_i;
+          crc_bmode: crc_operand = {crc_op_a[7:0], 24'h0};
+          crc_hmode: crc_operand = {crc_op_a[15:0], 16'h0};
+          default:   crc_operand = crc_op_a;
         endcase
       end
+
+      logic [31:0] clmul_op_a_blinded;
+      logic [31:0] clmul_op_b_blinded;
+      logic [31:0] clmul_valq_blinded;
+
+      AND_gate #(.N(32)) u_clmul_op_a_blinded_and (.A1(clmul_op_a),     .A2({32{op_pipelined.ops_clm}}), .ZN(clmul_op_a_blinded));
+      AND_gate #(.N(32)) u_clmul_op_b_blinded_and (.A1(clmul_op_b),     .A2({32{op_pipelined.ops_clm}}), .ZN(clmul_op_b_blinded));
+      AND_gate #(.N(32)) u_clmul_imdq_blinded_and (.A1(imd_val_q_i[0]), .A2({32{op_pipelined.ops_clm}}), .ZN(clmul_valq_blinded));
+
 
       // Select clmul input
       always_comb begin
         if (crc_op) begin
-          clmul_op_a = instr_first_cycle_i ? crc_operand : imd_val_q_i[0];
+          clmul_op_a = instr_first_cycle_i ? crc_operand : clmul_valq_blinded;
           clmul_op_b = instr_first_cycle_i ? crc_mu_rev : crc_poly;
         end else begin
-          clmul_op_a = clmul_rmode | clmul_hmode ? operand_a_rev : operand_a_i;
-          clmul_op_b = clmul_rmode | clmul_hmode ? operand_b_rev : operand_b_i;
+          clmul_op_a = clmul_rmode | clmul_hmode ? rev_op_a : clmul_op_a_blinded;
+          clmul_op_b = clmul_rmode | clmul_hmode ? rev_op_b : clmul_op_b_blinded;
         end
       end
+
 
       for (genvar i = 0; i < 32; i++) begin : gen_clmul_and_op
         assign clmul_and_stage[i] = clmul_op_b[i] ? clmul_op_a << i : '0;
@@ -1080,26 +1226,26 @@ module ibex_alu #(
         bitcnt_partial_q = '{default: '0};
 
         for (int unsigned i = 0; i < 32; i++) begin : gen_bitcnt_reg_out_lsb
-          bitcnt_partial_q[i][0] = imd_val_q_i[0][i];
+          bitcnt_partial_q[i][0] = multicycle_op_q0[i];
         end
 
         for (int unsigned i = 0; i < 16; i++) begin : gen_bitcnt_reg_out_b1
-          bitcnt_partial_q[2*i+1][1] = imd_val_q_i[1][i];
+          bitcnt_partial_q[2*i+1][1] = multicycle_op_q1[i];
         end
 
         for (int unsigned i = 0; i < 8; i++) begin : gen_bitcnt_reg_out_b2
-          bitcnt_partial_q[4*i+3][2] = imd_val_q_i[1][16+i];
+          bitcnt_partial_q[4*i+3][2] = multicycle_op_q1[16+i];
         end
 
         for (int unsigned i = 0; i < 4; i++) begin : gen_bitcnt_reg_out_b3
-          bitcnt_partial_q[8*i+7][3] = imd_val_q_i[1][24+i];
+          bitcnt_partial_q[8*i+7][3] = multicycle_op_q1[24+i];
         end
 
         for (int unsigned i = 0; i < 2; i++) begin : gen_bitcnt_reg_out_b4
-          bitcnt_partial_q[16*i+15][4] = imd_val_q_i[1][28+i];
+          bitcnt_partial_q[16*i+15][4] = multicycle_op_q1[28+i];
         end
 
-        bitcnt_partial_q[31][5] = imd_val_q_i[1][30];
+        bitcnt_partial_q[31][5] = multicycle_op_q1[30];
       end
 
       logic [31:0] butterfly_mask_l[5];
@@ -1136,8 +1282,12 @@ module ibex_alu #(
             ~(butterfly_mask_l[stg] | butterfly_mask_r[stg]);
       end
 
+      logic [31:0] butterfly_op_a, butterfly_op_b;
+      AND_gate #(.N(32)) u_butterfly_op_a_and (.A1(operand_a_i), .A2({32{op_pipelined.ops_multicycle}}), .ZN(butterfly_op_a));
+      AND_gate #(.N(32)) u_butterfly_op_b_and (.A1(operand_b_i), .A2({32{op_pipelined.ops_multicycle}}), .ZN(butterfly_op_b));
+
       always_comb begin
-        butterfly_result = operand_a_i;
+        butterfly_result = butterfly_op_a;
 
         butterfly_result = butterfly_result & butterfly_mask_not[0] |
             ((butterfly_result & butterfly_mask_l[0]) >> 16)|
@@ -1159,11 +1309,11 @@ module ibex_alu #(
             ((butterfly_result & butterfly_mask_l[4]) >> 1)|
             ((butterfly_result & butterfly_mask_r[4]) << 1);
 
-        butterfly_result = butterfly_result & operand_b_i;
+        butterfly_result = butterfly_result & butterfly_op_b;
       end
 
       always_comb begin
-        invbutterfly_result = operand_a_i & operand_b_i;
+        invbutterfly_result = butterfly_op_a & butterfly_op_b;
 
         invbutterfly_result = invbutterfly_result & butterfly_mask_not[4] |
             ((invbutterfly_result & butterfly_mask_l[4]) >> 1)|
@@ -1202,11 +1352,18 @@ module ibex_alu #(
     // For ternary instructions (zbt), operand_a_i is tied to rs1 in the first cycle and rs3 in the
     // second cycle. operand_b_i is always tied to rs2.
 
+    logic [31:0] multicycle_op_a, multicycle_op_b;
+    logic [31:0] multicycle_op_q0, multicycle_op_q1;
+    AND_gate #(.N(32)) u_multicycle_op_a_and (.A1(operand_a_i), .A2({32{op_pipelined.ops_multicycle}}), .ZN(multicycle_op_a));
+    AND_gate #(.N(32)) u_multicycle_op_b_and (.A1(operand_b_i), .A2({32{op_pipelined.ops_multicycle}}), .ZN(multicycle_op_b));
+    AND_gate #(.N(32)) u_multicycle_op_q0_and (.A1(imd_val_q_i[0]), .A2({32{op_pipelined.ops_multicycle}}), .ZN(multicycle_op_q0));
+    AND_gate #(.N(32)) u_multicycle_op_q1_and (.A1(imd_val_q_i[1]), .A2({32{op_pipelined.ops_multicycle}}), .ZN(multicycle_op_q1));
+
     always_comb begin
       unique case (operator_i)
         ALU_CMOV: begin
-          multicycle_result = (operand_b_i == 32'h0) ? operand_a_i : imd_val_q_i[0];
-          imd_val_d_o = '{operand_a_i, 32'h0};
+          multicycle_result = (multicycle_op_b == 32'h0) ? multicycle_op_a : multicycle_op_q0;
+          imd_val_d_o = '{multicycle_op_a, 32'h0};
           if (instr_first_cycle_i) begin
             imd_val_we_o = 2'b01;
           end else begin
@@ -1215,7 +1372,7 @@ module ibex_alu #(
         end
 
         ALU_CMIX: begin
-          multicycle_result = imd_val_q_i[0] | bwlogic_and_result;
+          multicycle_result = multicycle_op_q0 | bwlogic_and_result;
           imd_val_d_o = '{bwlogic_and_result, 32'h0};
           if (instr_first_cycle_i) begin
             imd_val_we_o = 2'b01;
@@ -1227,9 +1384,9 @@ module ibex_alu #(
         ALU_FSR, ALU_FSL,
         ALU_ROL, ALU_ROR: begin
           if (shift_amt[4:0] == 5'h0) begin
-            multicycle_result = shift_amt[5] ? operand_a_i : imd_val_q_i[0];
+            multicycle_result = shift_amt[5] ? multicycle_op_a : multicycle_op_q0;
           end else begin
-            multicycle_result = imd_val_q_i[0] | shift_result;
+            multicycle_result = multicycle_op_q0 | shift_result;
           end
           imd_val_d_o = '{shift_result, 32'h0};
           if (instr_first_cycle_i) begin
@@ -1244,8 +1401,8 @@ module ibex_alu #(
         ALU_CRC32_B, ALU_CRC32C_B: begin
           if (RV32B == RV32BOTEarlGrey || RV32B == RV32BFull) begin
             unique case (1'b1)
-              crc_bmode: multicycle_result = clmul_result_rev ^ (operand_a_i >> 8);
-              crc_hmode: multicycle_result = clmul_result_rev ^ (operand_a_i >> 16);
+              crc_bmode: multicycle_result = clmul_result_rev ^ (multicycle_op_a >> 8);
+              crc_hmode: multicycle_result = clmul_result_rev ^ (multicycle_op_a >> 16);
               default:   multicycle_result = clmul_result_rev;
             endcase
             imd_val_d_o = '{clmul_result_rev, 32'h0};
@@ -1255,7 +1412,7 @@ module ibex_alu #(
               imd_val_we_o = 2'b00;
             end
           end else begin
-            imd_val_d_o = '{operand_a_i, 32'h0};
+            imd_val_d_o = '{multicycle_op_a, 32'h0};
             imd_val_we_o = 2'b00;
             multicycle_result = '0;
           end
@@ -1272,14 +1429,14 @@ module ibex_alu #(
               imd_val_we_o = 2'b00;
             end
           end else begin
-            imd_val_d_o = '{operand_a_i, 32'h0};
+            imd_val_d_o = '{multicycle_op_a, 32'h0};
             imd_val_we_o = 2'b00;
             multicycle_result = '0;
           end
         end
 
         default: begin
-          imd_val_d_o = '{operand_a_i, 32'h0};
+          imd_val_d_o = '{multicycle_op_a, 32'h0};
           imd_val_we_o = 2'b00;
           multicycle_result = '0;
         end
@@ -1317,52 +1474,155 @@ module ibex_alu #(
   ////////////////
 
   always_comb begin
-    result_o   = '0;
+    // Blinding of unwanted operation inputs (horizontal leakage / power savings) 
+    op_raw.ops_binary     = '0;
+    op_raw.ops_adder      = '0;
+    op_raw.ops_shifter    = '0;
+    op_raw.ops_shuffle    = '0;
+    op_raw.ops_crossbar   = '0;
+    op_raw.ops_comparison = '0;
+    op_raw.ops_minmax     = '0;
+    op_raw.ops_bitcnt     = '0;
+    op_raw.ops_pack       = '0;
+    op_raw.ops_extend     = '0;
+    op_raw.ops_multicycle = '0;
+    op_raw.ops_bitmanip   = '0;
+    op_raw.ops_general    = '0;
+    op_raw.ops_bitfield   = '0;
+    op_raw.ops_clm        = '0;
+
+    // Result Mux Selection initialization
+    op_raw.sel_binary     = '0;
+    op_raw.sel_adder      = '0;
+    op_raw.sel_shifter    = '0;
+    op_raw.sel_shuffle    = '0;
+    op_raw.sel_crossbar   = '0;
+    op_raw.sel_comparison = '0;
+    op_raw.sel_minmax     = '0;
+    op_raw.sel_bitcnt     = '0;
+    op_raw.sel_pack       = '0;
+    op_raw.sel_extend     = '0;
+    op_raw.sel_multicycle = '0;
+    op_raw.sel_bitmanip   = '0;
+    op_raw.sel_general    = '0;
+    op_raw.sel_bitfield   = '0;
+    op_raw.sel_clm        = '0;
 
     unique case (operator_i)
       // Bitwise Logic Operations (negate: RV32B)
       ALU_XOR,  ALU_XNOR,
       ALU_OR,   ALU_ORN,
-      ALU_AND,  ALU_ANDN: result_o = bwlogic_result;
+      ALU_AND,  ALU_ANDN:
+      begin
+        op_raw.sel_binary = 1'b1;
+        op_raw.ops_binary = 1'b1;
+
+        // ops_adder = 1'b1;
+        // ops_comparison = 1'b1;
+      end
 
       // Adder Operations
       ALU_ADD,  ALU_SUB,
       // RV32B
       ALU_SH1ADD, ALU_SH2ADD,
-      ALU_SH3ADD: result_o = adder_result;
+      ALU_SH3ADD:
+      begin
+        op_raw.sel_adder = 1'b1;
+        op_raw.ops_adder = 1'b1;
+        op_raw.ops_comparison = 1'b1;
+      end
 
       // Shift Operations
       ALU_SLL,  ALU_SRL,
       ALU_SRA,
       // RV32B
-      ALU_SLO,  ALU_SRO: result_o = shift_result;
+      ALU_SLO,  ALU_SRO:
+      begin
+        op_raw.sel_shifter = 1'b1;
+        op_raw.ops_shifter = 1'b1;
+
+
+        op_raw.ops_adder = 1'b1;
+        op_raw.ops_comparison = 1'b1;
+      end
 
       // Shuffle Operations (RV32B)
-      ALU_SHFL, ALU_UNSHFL: result_o = shuffle_result;
+      ALU_SHFL, ALU_UNSHFL:
+      begin
+        op_raw.sel_shuffle = 1'b1;
+        op_raw.ops_shuffle = 1'b1;
+
+
+        op_raw.ops_adder = 1'b1;
+        op_raw.ops_comparison = 1'b1;
+      end
 
       // Crossbar Permutation Operations (RV32B)
-      ALU_XPERM_N, ALU_XPERM_B, ALU_XPERM_H: result_o = xperm_result;
+      ALU_XPERM_N, ALU_XPERM_B, ALU_XPERM_H:
+      begin
+        op_raw.sel_crossbar = 1'b1;
+        op_raw.ops_crossbar = 1'b1;
+
+
+        op_raw.ops_adder = 1'b1;
+        op_raw.ops_comparison = 1'b1;
+      end
 
       // Comparison Operations
       ALU_EQ,   ALU_NE,
       ALU_GE,   ALU_GEU,
       ALU_LT,   ALU_LTU,
-      ALU_SLT,  ALU_SLTU: result_o = {31'h0,cmp_result};
+      ALU_SLT,  ALU_SLTU:
+      begin
+        op_raw.sel_comparison = 1'b1;
+        op_raw.ops_comparison = 1'b1;
+        op_raw.ops_adder = 1'b1; //The adder is required for some comparisons
+      end
 
       // MinMax Operations (RV32B)
       ALU_MIN,  ALU_MAX,
-      ALU_MINU, ALU_MAXU: result_o = minmax_result;
+      ALU_MINU, ALU_MAXU:
+      begin
+        op_raw.sel_minmax = 1'b1;
+        op_raw.ops_minmax = 1'b1;
 
+        op_raw.ops_adder = 1'b1;
+        op_raw.ops_comparison = 1'b1;
+      end
+     
       // Bitcount Operations (RV32B)
       ALU_CLZ, ALU_CTZ,
-      ALU_CPOP: result_o = {26'h0, bitcnt_result};
+      ALU_CPOP:
+      begin 
+        op_raw.sel_bitcnt = 1'b1;
+        op_raw.ops_bitcnt = 1'b1;
+
+
+        op_raw.ops_adder = 1'b1;
+        op_raw.ops_comparison = 1'b1;
+      end
 
       // Pack Operations (RV32B)
       ALU_PACK, ALU_PACKH,
-      ALU_PACKU: result_o = pack_result;
+      ALU_PACKU:
+      begin 
+        op_raw.sel_pack = 1'b1;
+        op_raw.ops_pack = 1'b1;
 
+
+        op_raw.ops_adder = 1'b1;
+        op_raw.ops_comparison = 1'b1;
+      end
       // Sign-Extend (RV32B)
-      ALU_SEXTB, ALU_SEXTH: result_o = sext_result;
+      ALU_SEXTB, ALU_SEXTH:
+      begin
+        op_raw.sel_extend = 1'b1;
+        op_raw.ops_extend = 1'b1;
+
+
+        op_raw.ops_adder = 1'b1;
+        op_raw.ops_comparison = 1'b1;
+      end
 
       // Ternary Bitmanip Operations (RV32B)
       ALU_CMIX, ALU_CMOV,
@@ -1374,27 +1634,162 @@ module ibex_alu #(
       ALU_CRC32_H, ALU_CRC32C_H,
       ALU_CRC32_B, ALU_CRC32C_B,
       // Bit Compress / Decompress (RV32B)
-      ALU_BCOMPRESS, ALU_BDECOMPRESS: result_o = multicycle_result;
+      ALU_BCOMPRESS, ALU_BDECOMPRESS:
+      begin 
+        op_raw.sel_multicycle = 1'b1;
+        op_raw.ops_multicycle = 1'b1;
+
+        unique case (operator_i)
+          ALU_CMIX: op_raw.ops_binary = 1'b1;
+          ALU_FSL, ALU_FSR,
+          ALU_ROL, ALU_ROR: op_raw.ops_shifter = 1'b1;
+          ALU_CRC32_W, ALU_CRC32C_W,
+          ALU_CRC32_H, ALU_CRC32C_H,
+          ALU_CRC32_B, ALU_CRC32C_B: op_raw.ops_clm = 1'b1;
+          ALU_BCOMPRESS, ALU_BDECOMPRESS: op_raw.ops_bitcnt = 1'b1;
+          default: ;
+        endcase
+
+        op_raw.ops_adder = 1'b1;
+        op_raw.ops_comparison = 1'b1;
+      end
 
       // Single-Bit Bitmanip Operations (RV32B)
       ALU_BSET, ALU_BCLR,
-      ALU_BINV, ALU_BEXT: result_o = singlebit_result;
+      ALU_BINV, ALU_BEXT:
+      begin 
+        op_raw.sel_bitmanip = 1'b1;
+        op_raw.ops_bitmanip = 1'b1;
+        op_raw.ops_shifter = 1'b1; // This causes horizontatl leakage on immediate operations (e.g. xori)
+        
+        
+        // ops_adder = 1'b1;
+        // ops_comparison = 1'b1;
+      end
 
       // General Reverse / Or-combine (RV32B)
-      ALU_GREV, ALU_GORC: result_o = rev_result;
+      ALU_GREV, ALU_GORC:
+      begin 
+        op_raw.sel_general = 1'b1;
+        op_raw.ops_general = 1'b1;
+
+
+        op_raw.ops_adder = 1'b1;
+        op_raw.ops_comparison = 1'b1;
+      end
 
       // Bit Field Place (RV32B)
-      ALU_BFP: result_o = bfp_result;
+      ALU_BFP:
+      begin
+        op_raw.sel_bitfield = 1'b1;
+        op_raw.ops_bitfield = 1'b1;
+        op_raw.ops_shifter = 1'b1;
+
+
+        // ops_adder = 1'b1;
+        // ops_comparison = 1'b1;
+      end
 
       // Carry-less Multiply Operations (RV32B)
       ALU_CLMUL, ALU_CLMULR,
-      ALU_CLMULH: result_o = clmul_result;
+      ALU_CLMULH:
+      begin
+        op_raw.sel_clm = 1'b1;
+        op_raw.ops_clm = 1'b1;
 
-      default: ;
+
+        op_raw.ops_adder = 1'b1;
+        op_raw.ops_comparison = 1'b1;
+      end
+
+      default: 
+        begin
+          op_raw.ops_adder = 1'b1; // Allow for address computation
+          op_raw.ops_comparison = 1'b1; // Allow for branch predictor
+        end
     endcase
+
+    op_raw.sel_adder_mul = multdiv_sel_i & op_raw.ops_adder;
+    op_raw.sel_adder_neg = adder_op_b_negate & op_raw.ops_adder;
+    op_raw.sel_adder_std = ~(multdiv_sel_i|adder_op_b_negate) & op_raw.ops_adder;
+    op_raw.sel_adder_a_sh1 = adder_op_a_shift1 & op_raw.ops_adder;
+    op_raw.sel_adder_a_sh2 = adder_op_a_shift2 & op_raw.ops_adder;
+    op_raw.sel_adder_a_sh3 = adder_op_a_shift3 & op_raw.ops_adder;
+    op_raw.sel_adder_a_std = ~(multdiv_sel_i|adder_op_a_shift1|adder_op_a_shift2|adder_op_a_shift3) & op_raw.ops_adder;
   end
+
+  // DCR module
+  DCR #(
+    .IS_POSEDGE(0),
+    .N($bits(operator_mux_out)) 
+  ) precharge_phase (
+    .clk   (clk_i),
+    .EN    (1'b1),
+    .RST_N (rst_ni),
+    .D     (op_raw),
+    .Q     (op_pipelined)
+  );
+  // assign op_pipelined = op_raw & (!{$bits(operator_mux_out){clk_i}});
 
   logic unused_shift_amt_compl;
   assign unused_shift_amt_compl = shift_amt_compl[5];
+
+  //////////////////////
+  // Result Filtering //
+  //////////////////////
+
+  logic [31:0] res_binary;
+  logic [31:0] res_adder;
+  logic [31:0] res_shifter;
+  logic [31:0] res_shuffle;
+  logic [31:0] res_crossbar;
+  logic [31:0] res_comparison;
+  logic [31:0] res_minmax;
+  logic [31:0] res_bitcnt;
+  logic [31:0] res_pack;
+  logic [31:0] res_extend;
+  logic [31:0] res_multicycle;
+  logic [31:0] res_bitmanip;
+  logic [31:0] res_general;
+  logic [31:0] res_bitfield;
+  logic [31:0] res_clm;
+
+  logic [31:0] cmp_result_ext;
+  logic [31:0] bitcnt_result_ext;
+
+  assign cmp_result_ext = {31'h0, cmp_result}; // Do i need to blind this as well?
+  assign bitcnt_result_ext = {26'h0, bitcnt_result};
+
+  AND_gate #(.N(32)) u_res_binary     (.A1(bwlogic_result),    .A2({32{op_pipelined.sel_binary}}),     .ZN(res_binary));
+  AND_gate #(.N(32)) u_res_adder      (.A1(adder_result),      .A2({32{op_pipelined.sel_adder}}),      .ZN(res_adder));
+  AND_gate #(.N(32)) u_res_shifter    (.A1(shift_result),      .A2({32{op_pipelined.sel_shifter}}),    .ZN(res_shifter));
+  AND_gate #(.N(32)) u_res_shuffle    (.A1(shuffle_result),    .A2({32{op_pipelined.sel_shuffle}}),    .ZN(res_shuffle));
+  AND_gate #(.N(32)) u_res_crossbar   (.A1(xperm_result),      .A2({32{op_pipelined.sel_crossbar}}),   .ZN(res_crossbar));
+  AND_gate #(.N(32)) u_res_comparison (.A1(cmp_result_ext),    .A2({32{op_pipelined.sel_comparison}}), .ZN(res_comparison));
+  AND_gate #(.N(32)) u_res_minmax     (.A1(minmax_result),     .A2({32{op_pipelined.sel_minmax}}),     .ZN(res_minmax));
+  AND_gate #(.N(32)) u_res_bitcnt     (.A1(bitcnt_result_ext), .A2({32{op_pipelined.sel_bitcnt}}),     .ZN(res_bitcnt));
+  AND_gate #(.N(32)) u_res_pack       (.A1(pack_result),       .A2({32{op_pipelined.sel_pack}}),       .ZN(res_pack));
+  AND_gate #(.N(32)) u_res_extend     (.A1(sext_result),       .A2({32{op_pipelined.sel_extend}}),     .ZN(res_extend));
+  AND_gate #(.N(32)) u_res_multicycle (.A1(multicycle_result), .A2({32{op_pipelined.sel_multicycle}}), .ZN(res_multicycle));
+  AND_gate #(.N(32)) u_res_bitmanip   (.A1(singlebit_result),  .A2({32{op_pipelined.sel_bitmanip}}),   .ZN(res_bitmanip));
+  AND_gate #(.N(32)) u_res_general    (.A1(rev_result),        .A2({32{op_pipelined.sel_general}}),    .ZN(res_general));
+  AND_gate #(.N(32)) u_res_bitfield   (.A1(bfp_result),        .A2({32{op_pipelined.sel_bitfield}}),   .ZN(res_bitfield));
+  AND_gate #(.N(32)) u_res_clm        (.A1(clmul_result),      .A2({32{op_pipelined.sel_clm}}),        .ZN(res_clm));
+
+  assign result_o = res_binary     |
+                    res_adder      |
+                    res_shifter    |
+                    res_shuffle    |
+                    res_crossbar   |
+                    res_comparison |
+                    res_minmax     |
+                    res_bitcnt     |
+                    res_pack       |
+                    res_extend     |
+                    res_multicycle |
+                    res_bitmanip   |
+                    res_general    |
+                    res_bitfield   |
+                    res_clm;
 
 endmodule

@@ -1,6 +1,8 @@
 // Copyright lowRISC contributors.
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
+// Modified 2026 by Niels Wieser, TU Darmstadt:
+// countermeasures against micro-architectural leakage.
 
 /**
  * Simplistic Ibex bus implementation
@@ -60,6 +62,7 @@ module bus #(
 
   logic [NumBitsHostSel-1:0] host_sel_req, host_sel_resp;
   logic [NumBitsDeviceSel-1:0] device_sel_req, device_sel_resp;
+  logic [NrDevices-1:0] device_sel_oh_req, device_sel_oh_resp;
 
   // Master select priority arbiter
   always_comb begin
@@ -77,11 +80,13 @@ module bus #(
   always_comb begin
     device_sel_valid = 1'b0;
     device_sel_req = '0;
+    device_sel_oh_req = '0;
     for (integer device = 0; device < NrDevices; device = device + 1) begin
       if ((host_addr_i[host_sel_req] & cfg_device_addr_mask[device])
           == cfg_device_addr_base[device]) begin
         device_sel_valid = 1'b1;
         device_sel_req = NumBitsDeviceSel'(device);
+        device_sel_oh_req[device] = host_sel_valid;
       end
     end
   end
@@ -90,19 +95,60 @@ module bus #(
      if (!rst_ni) begin
         host_sel_resp <= '0;
         device_sel_resp <= '0;
+        // device_sel_oh_resp <= '0;
         decode_err_resp <= 1'b0;
      end else begin
         // Responses are always expected 1 cycle after the request
         device_sel_resp <= device_sel_req;
+        // device_sel_oh_resp <= device_sel_oh_req;
         host_sel_resp <= host_sel_req;
         // Decode failed; no device matched?
         decode_err_resp <= host_sel_valid & !device_sel_valid;
      end
   end
 
+  // DCR one-hot encoded select signal
+  logic [NrDevices-1:0] device_sel_oh_dcr;
+  logic [NrDevices-1:0] device_sel_oh_dcr_in;
+  logic                 clear_select;
+  logic                 dcr_select_en;
+  logic [NrDevices-1:0] device_rvalid_packed;
+
+  always_comb begin
+    for (integer i = 0; i < NrDevices; i = i + 1) begin
+      device_rvalid_packed[i] = device_rvalid_i[i];
+    end
+  end
+
+  assign clear_select  = |(device_rvalid_packed & device_sel_oh_resp);
+  assign dcr_select_en = host_sel_valid | clear_select;
+  assign device_sel_oh_dcr_in = device_sel_oh_req & {NrDevices{~clear_select}};
+
+  DCR #(
+    .IS_POSEDGE(1),
+    .N(NrDevices)
+  ) dcr_select (
+    .clk   (clk_i),
+    .EN    (dcr_select_en),
+    .RST_N (rst_ni),
+    .D     (device_sel_oh_dcr_in),
+    .Q     (device_sel_oh_dcr)
+  );
+  DCR #(
+    .IS_POSEDGE(0),
+    .N(NrDevices)
+  ) dcr_select_buf (
+    .clk (clk_i),
+    .EN  (1'b1),
+    .RST_N (rst_ni),
+    .D   (device_sel_oh_dcr),
+    .Q   (device_sel_oh_resp)
+  );
+
+
   always_comb begin
     for (integer device = 0; device < NrDevices; device = device + 1) begin
-      if (device_sel_valid && NumBitsDeviceSel'(device) == device_sel_req) begin
+      if (device_sel_oh_req[device]) begin
         device_req_o[device]   = host_req_i[host_sel_req];
         device_we_o[device]    = host_we_i[host_sel_req];
         device_addr_o[device]  = host_addr_i[host_sel_req];
@@ -118,13 +164,55 @@ module bus #(
     end
   end
 
+  // Gating data based on 1-hot value
+  logic [DataWidth-1:0] oh_read [NrDevices];
+  for (genvar device = 0; device < NrDevices; device = device + 1) begin : gen_oh_read
+    AND_gate #(.N(DataWidth)) device_and (
+      .A1(device_rdata_i[device]),
+      .A2({DataWidth{device_sel_oh_resp[device]}}),
+      .ZN(oh_read[device])
+    );
+  end
+
+  // Combining read data, valid, and error with one-hot logic
+  logic [DataWidth-1:0] host_rdata;
+  logic                 host_rvalid;
+  logic                 host_err;
+
+  always_comb begin
+    host_rdata = '0;
+    host_rvalid = decode_err_resp;
+    host_err    = decode_err_resp;
+    for (integer device = 0; device < NrDevices; device = device + 1) begin
+      host_rdata  |= oh_read[device];
+      host_rvalid |= (device_rvalid_i[device] & device_sel_oh_dcr[device]);
+      host_err    |= (device_err_i[device]    & device_sel_oh_dcr[device]);
+    end
+  end
+
+  // DCR one-hot encoded select signal
+  logic host_err_buf;
+  logic host_rvalid_buf;
+  logic [DataWidth-1:0] host_rdata_buf;
+  DCR #(
+    .IS_POSEDGE(0),
+    // .N(DataWidth+2)
+    .N(2)
+  ) dcr_buffer (
+    .clk   (clk_i),
+    .EN    (1'b1),
+    .RST_N (rst_ni),
+    .D     ({     host_rvalid,     host_err}),
+    .Q     ({ host_rvalid_buf, host_err_buf})
+  );
+
   always_comb begin
     for (integer host = 0; host < NrHosts; host = host + 1) begin
       host_gnt_o[host] = 1'b0;
       if (NumBitsHostSel'(host) == host_sel_resp) begin
-        host_rvalid_o[host] = device_rvalid_i[device_sel_resp] | decode_err_resp;
-        host_err_o[host]    = device_err_i[device_sel_resp]    | decode_err_resp;
-        host_rdata_o[host]  = device_rdata_i[device_sel_resp];
+        host_rvalid_o[host] = host_rvalid_buf || host_rvalid;
+        host_err_o[host]    = host_err_buf || host_err;
+        host_rdata_o[host]  = host_rdata;
       end else begin
         host_rvalid_o[host] = 1'b0;
         host_err_o[host]    = 1'b0;
@@ -133,4 +221,5 @@ module bus #(
     end
     host_gnt_o[host_sel_req] = host_req_i[host_sel_req];
   end
+
 endmodule

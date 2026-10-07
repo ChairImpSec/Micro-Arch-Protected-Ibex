@@ -1,0 +1,122 @@
+CAPI=2:
+# Copyright lowRISC contributors.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+# Modified 2026 by Niels Wieser, TU Darmstadt:
+# adapted as evaluation system for the micro-architecturally protected Ibex.
+name: "lowrisc:ibex:synthesis_system"
+description: "Simple system for synthesis"
+filesets:
+  files_rtl:
+    depend:
+      - lowrisc:ibex:synthesis_system_core
+
+parameters:
+  RV32E:
+    datatype: int
+    paramtype: vlogparam
+    default: 0
+  RV32M:
+    datatype: str
+    default: ibex_pkg::RV32MFast
+    paramtype: vlogdefine
+  RV32B:
+    datatype: str
+    default: ibex_pkg::RV32BNone
+    paramtype: vlogdefine
+  RegFile:
+    datatype: str
+    default: ibex_pkg::RegFileFF
+    paramtype: vlogdefine
+  ICache:
+    datatype: int
+    default: 0
+    paramtype: vlogparam
+  ICacheECC:
+    datatype: int
+    default: 0
+    paramtype: vlogparam
+  SRAMInitFile:
+    datatype: str
+    paramtype: vlogparam
+  BranchTargetALU:
+    datatype: int
+    paramtype: vlogparam
+    default: 0
+  WritebackStage:
+    datatype: int
+    paramtype: vlogparam
+    default: 0
+  SecureIbex:
+    datatype: int
+    default: 0
+    paramtype: vlogparam
+  ICacheScramble:
+    datatype: int
+    default: 0
+    paramtype: vlogparam
+  BranchPredictor:
+    datatype: int
+    paramtype: vlogparam
+    default: 0
+  DbgTriggerEn:
+    datatype: int
+    default: 0
+    paramtype: vlogparam
+  PMPEnable:
+    datatype: int
+    default: 0
+    paramtype: vlogparam
+  PMPGranularity:
+    datatype: int
+    default: 0
+    paramtype: vlogparam
+  PMPNumRegions:
+    datatype: int
+    default: 4
+    paramtype: vlogparam
+  MHPMCounterNum:
+    datatype: int
+    paramtype: vlogparam
+    default: 0
+  MHPMCounterWidth:
+    datatype: int
+    paramtype: vlogparam
+    default: 40
+
+targets:
+  default: &default_target
+    filesets:
+      - files_rtl
+    toplevel: ibex_simple_system
+    parameters:
+      - RV32E
+      - RV32M
+      - RV32B
+      - RegFile
+      - ICache
+      - ICacheScramble
+      - ICacheECC
+      - BranchTargetALU
+      - WritebackStage
+      - SecureIbex
+      - BranchPredictor
+      - DbgTriggerEn
+      - PMPEnable
+      - PMPGranularity
+      - PMPNumRegions
+      - MHPMCounterNum
+      - MHPMCounterWidth
+      - SRAMInitFile
+
+  lint:
+    <<: *default_target
+    default_tool: verilator
+    tools:
+      verilator:
+        mode: lint-only
+        verilator_options:
+          - "-Wall"
+          # RAM primitives wider than 64bit (required for ECC) fail to build in
+          # Verilator without increasing the unroll count (see Verilator#1266)
+          - "--unroll-count 72"

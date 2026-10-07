@@ -1,0 +1,43 @@
+CAPI=2:
+# Copyright lowRISC contributors.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+# Modified 2026 by Niels Wieser, TU Darmstadt:
+# adapted as evaluation system for the micro-architecturally protected Ibex.
+name: "lowrisc:ibex:synthesis_system_core"
+description: "Simple system for synthesis"
+filesets:
+  files_rtl:
+    depend:
+      - lowrisc:ibex:ibex_top
+      - lowrisc:ibex:sim_shared
+    files:
+      - rtl/ibex_simple_system.sv
+      - rtl/custom_sram.sv
+      - rtl/custom_rom.sv
+      - rtl/DCR.v
+      - rtl/DFF_cell.v
+      - rtl/DFFE_cell.v
+      - rtl/DFFR_cell.v
+      - rtl/FDRE.v
+      - rtl/AND_gate.v
+      - rtl/XOR_gate.v
+      - rtl/INV_gate.v
+      - rtl/OR_gate.v
+
+      - rtl/mem_crypt.sv
+      - rtl/mem_prng.sv
+      - rtl/cipher_beanie.sv
+      - rtl/tweakey.sv
+      
+      - rtl/vivado_wrapper.sv
+      - rtl/vivado_cpu.sv
+      - rtl/memory.sv
+      - rtl/enc_memory.sv
+    file_type: systemVerilogSource
+
+targets:
+  default:
+    filesets:
+      - files_rtl
+    toplevel: ibex_simple_system

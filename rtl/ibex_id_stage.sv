@@ -2,6 +2,8 @@
 // Copyright 2018 ETH Zurich and University of Bologna, see also CREDITS.md.
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
+// Modified 2026 by Niels Wieser, TU Darmstadt:
+// countermeasures against micro-architectural leakage.
 
 `ifdef RISCV_FORMAL
   `define RVFI
@@ -35,7 +37,7 @@ module ibex_id_stage #(
 
   // Interface to IF stage
   input  logic                      instr_valid_i,
-  input  logic [31:0]               instr_rdata_i,         // from IF-ID pipeline registers
+  input  logic [31:0]               instr_rdata_dcr_i,         // from IF-ID pipeline registers
   input  logic [31:0]               instr_rdata_alu_i,     // from IF-ID pipeline registers
   input  logic [15:0]               instr_rdata_c_i,       // from IF-ID pipeline registers
   input  logic                      instr_is_compressed_i,
@@ -69,6 +71,7 @@ module ibex_id_stage #(
   input  logic                      lsu_resp_valid_i, // LSU has valid output, or is done
   // ALU
   output ibex_pkg::alu_op_e         alu_operator_ex_o,
+  output logic                      can_skip_add_o,
   output logic [31:0]               alu_operand_a_ex_o,
   output logic [31:0]               alu_operand_b_ex_o,
 
@@ -314,15 +317,24 @@ module ibex_id_stage #(
   assign imm_a = (imm_a_mux_sel == IMM_A_Z) ? zimm_rs1_type : '0;
 
   // Main ALU MUX for Operand A
-  always_comb begin : alu_operand_a_mux
-    unique case (alu_op_a_mux_sel)
-      OP_A_REG_A:  alu_operand_a = rf_rdata_a_fwd;
-      OP_A_FWD:    alu_operand_a = lsu_addr_last_i;
-      OP_A_CURRPC: alu_operand_a = pc_id_i;
-      OP_A_IMM:    alu_operand_a = imm_a;
-      default:     alu_operand_a = pc_id_i;
-    endcase
-  end
+  logic [31:0] alu_a_reg_a;
+  logic [31:0] alu_a_fwd;
+  logic [31:0] alu_a_currpc;
+  logic [31:0] alu_a_imm;
+
+
+  assign dec_raw.sel_alu_a_reg_a  = alu_op_a_mux_sel == OP_A_REG_A;
+  assign dec_raw.sel_alu_a_fwd    = alu_op_a_mux_sel == OP_A_FWD;
+  assign dec_raw.sel_alu_a_currpc = alu_op_a_mux_sel == OP_A_CURRPC;
+  assign dec_raw.sel_alu_a_imm    = alu_op_a_mux_sel == OP_A_IMM;
+
+
+  AND_gate #(.N(32)) u_alu_a_reg_a  (.A1(rf_rdata_a_fwd),  .A2({32{dec_pipelined.sel_alu_a_reg_a}}),  .ZN(alu_a_reg_a));
+  AND_gate #(.N(32)) u_alu_a_fwd    (.A1(lsu_addr_last_i), .A2({32{dec_pipelined.sel_alu_a_fwd}}),    .ZN(alu_a_fwd));
+  AND_gate #(.N(32)) u_alu_a_currpc (.A1(pc_id_i),         .A2({32{dec_pipelined.sel_alu_a_currpc}}), .ZN(alu_a_currpc));
+  AND_gate #(.N(32)) u_alu_a_imm    (.A1(imm_a),           .A2({32{dec_pipelined.sel_alu_a_imm}}),    .ZN(alu_a_imm));
+
+  assign alu_operand_a = alu_a_reg_a | alu_a_fwd | alu_a_currpc | alu_a_imm;
 
   if (BranchTargetALU) begin : g_btalu_muxes
     // Branch target ALU operand A mux
@@ -395,20 +407,33 @@ module ibex_id_stage #(
   end
 
   // ALU MUX for Operand B
-  assign alu_operand_b = (alu_op_b_mux_sel == OP_B_IMM) ? imm_b : rf_rdata_b_fwd;
+  logic [31:0] alu_b_fwd;
+  logic [31:0] alu_b_imm;
+  assign dec_raw.sel_alu_b_imm    = alu_op_b_mux_sel == OP_B_IMM;
+  assign dec_raw.sel_alu_b_fwd    = ~(alu_op_b_mux_sel == OP_B_IMM);
+
+  AND_gate #(.N(32)) u_alu_b_fwd    (.A1(rf_rdata_b_fwd),  .A2({32{dec_pipelined.sel_alu_b_fwd}}),    .ZN(alu_b_fwd));
+  AND_gate #(.N(32)) u_alu_b_imm    (.A1(imm_b),           .A2({32{dec_pipelined.sel_alu_b_imm}}),    .ZN(alu_b_imm));
+
+  assign can_skip_add_o = (imm_b == '0) && dec_raw.sel_alu_b_imm;
+  
+
+
+  assign alu_operand_b = alu_b_fwd | alu_b_imm;
 
   /////////////////////////////////////////
   // Multicycle Operation Stage Register //
   /////////////////////////////////////////
 
   for (genvar i = 0; i < 2; i++) begin : gen_intermediate_val_reg
-    always_ff @(posedge clk_i or negedge rst_ni) begin : intermediate_val_reg
-      if (!rst_ni) begin
-        imd_val_q[i] <= '0;
-      end else if (imd_val_we_ex_i[i]) begin
-        imd_val_q[i] <= imd_val_d_ex_i[i];
-      end
-    end
+    DFFE_cell #(.N(34)) u_imd_val_reg (
+      .CK    (clk_i),
+      .D     (imd_val_d_ex_i[i]),
+      .EN    (imd_val_we_ex_i[i]),
+      .RST_N (rst_ni),
+      .Q     (imd_val_q[i]),
+      .QN    ()
+    );
   end
 
   assign imd_val_q_ex_o = imd_val_q;
@@ -421,18 +446,86 @@ module ibex_id_stage #(
   assign rf_we_id_o = rf_we_raw & instr_executing & ~illegal_csr_insn_i;
 
   // Register file write data mux
-  always_comb begin : rf_wdata_id_mux
-    unique case (rf_wdata_sel)
-      RF_WD_EX:  rf_wdata_id_o = result_ex_i;
-      RF_WD_CSR: rf_wdata_id_o = csr_rdata_i;
-      default:   rf_wdata_id_o = result_ex_i;
-    endcase
-  end
+  // always_comb begin : rf_wdata_id_mux
+  //   unique case (rf_wdata_sel)
+  //     RF_WD_EX:  rf_wdata_id_o = result_ex_i;
+  //     RF_WD_CSR: rf_wdata_id_o = csr_rdata_i;
+  //     default:   rf_wdata_id_o = result_ex_i;
+  //   endcase
+  // end
+
 
   /////////////
   // Decoder //
   /////////////
 
+   // Intermediate wires for decoder outputs
+  typedef struct packed {
+    logic                   illegal_insn;
+    logic                   mret_insn;
+    logic                   dret_insn;
+    logic                   ecall_insn;
+    logic                   wfi_insn;
+    logic                   jump_set;
+    logic                   icache_inval;
+    ibex_pkg::imm_a_sel_e   imm_a_mux_sel;
+    ibex_pkg::imm_b_sel_e   imm_b_mux_sel;
+    ibex_pkg::op_a_sel_e    bt_a_mux_sel;
+    ibex_pkg::imm_b_sel_e   bt_b_mux_sel;
+    logic [31:0]            imm_i_type;
+    logic [31:0]            imm_s_type;
+    logic [31:0]            imm_b_type;
+    logic [31:0]            imm_u_type;
+    logic [31:0]            imm_j_type;
+    logic [31:0]            zimm_rs1_type;
+    ibex_pkg::rf_wd_sel_e   rf_wdata_sel;
+    logic                   rf_we;
+    logic [4:0]             rf_raddr_a;
+    logic [4:0]             rf_raddr_b;
+    logic [4:0]             rf_waddr;
+    logic                   rf_ren_a;
+    logic                   rf_ren_b;
+    ibex_pkg::alu_op_e      alu_operator;
+    ibex_pkg::op_a_sel_e    alu_op_a_mux_sel;
+    ibex_pkg::op_b_sel_e    alu_op_b_mux_sel;
+    logic                   alu_multicycle;
+    logic                   mult_en;
+    logic                   div_en;
+    logic                   mult_sel;
+    logic                   div_sel;
+    ibex_pkg::md_op_e       multdiv_operator;
+    logic [1:0]             multdiv_signed_mode;
+    logic                   csr_access;
+    ibex_pkg::csr_op_e      csr_op;
+    ibex_pkg::csr_num_e     csr_addr;
+    logic                   data_req;
+    logic                   data_we;
+    logic [1:0]             data_type;
+    logic                   data_sign_extension;
+    logic                   jump_in_dec;
+    logic                   branch_in_dec;
+
+    logic                   sel_result_ex;
+    logic                   sel_result_cs;
+
+    logic                   sel_alu_a_reg_a;
+    logic                   sel_alu_a_fwd;
+    logic                   sel_alu_a_currpc;
+    logic                   sel_alu_a_imm;
+
+    logic                   sel_alu_b_fwd;
+    logic                   sel_alu_b_imm;
+
+    logic                   wb_match_a;
+    logic                   wb_match_b;
+    logic                   wb_notmatches_a;
+    logic                   wb_notmatches_b;
+  } decoder_out_t;
+
+  decoder_out_t dec_raw, dec_pipelined;
+  logic ebrk_insn_imm;
+
+  // Decoder Instantiation with intermediate wires
   ibex_decoder #(
     .RV32E          (RV32E),
     .RV32M          (RV32M),
@@ -442,75 +535,141 @@ module ibex_id_stage #(
     .clk_i (clk_i),
     .rst_ni(rst_ni),
 
-    // controller
-    .illegal_insn_o(illegal_insn_dec),
-    .ebrk_insn_o   (ebrk_insn),
-    .mret_insn_o   (mret_insn_dec),
-    .dret_insn_o   (dret_insn_dec),
-    .ecall_insn_o  (ecall_insn_dec),
-    .wfi_insn_o    (wfi_insn_dec),
-    .jump_set_o    (jump_set_dec),
-    .branch_taken_i(branch_taken),
-    .icache_inval_o(icache_inval_o),
+    .illegal_insn_o (dec_raw.illegal_insn),
+    .ebrk_insn_o    (ebrk_insn_imm),
+    .mret_insn_o    (dec_raw.mret_insn),
+    .dret_insn_o    (dec_raw.dret_insn),
+    .ecall_insn_o   (dec_raw.ecall_insn),
+    .wfi_insn_o     (dec_raw.wfi_insn),
+    .jump_set_o     (dec_raw.jump_set),
+    .branch_taken_i (branch_taken),
+    .icache_inval_o (dec_raw.icache_inval),
 
-    // from IF-ID pipeline register
-    .instr_first_cycle_i(instr_first_cycle),
-    .instr_rdata_i      (instr_rdata_i),
-    .instr_rdata_alu_i  (instr_rdata_alu_i),
-    .illegal_c_insn_i   (illegal_c_insn_i),
+    .instr_first_cycle_i (instr_first_cycle),
+    .instr_rdata_i       (instr_rdata_dcr_i), //If this is only valid during the first half, we get an error.
+    .instr_rdata_alu_i   (instr_rdata_alu_i),
+    .illegal_c_insn_i    (illegal_c_insn_i),
 
-    // immediates
-    .imm_a_mux_sel_o(imm_a_mux_sel),
-    .imm_b_mux_sel_o(imm_b_mux_sel_dec),
-    .bt_a_mux_sel_o (bt_a_mux_sel),
-    .bt_b_mux_sel_o (bt_b_mux_sel),
+    .imm_a_mux_sel_o (dec_raw.imm_a_mux_sel),
+    .imm_b_mux_sel_o (dec_raw.imm_b_mux_sel),
+    .bt_a_mux_sel_o  (dec_raw.bt_a_mux_sel),
+    .bt_b_mux_sel_o  (dec_raw.bt_b_mux_sel),
 
-    .imm_i_type_o   (imm_i_type),
-    .imm_s_type_o   (imm_s_type),
-    .imm_b_type_o   (imm_b_type),
-    .imm_u_type_o   (imm_u_type),
-    .imm_j_type_o   (imm_j_type),
-    .zimm_rs1_type_o(zimm_rs1_type),
+    .imm_i_type_o    (dec_raw.imm_i_type),
+    .imm_s_type_o    (dec_raw.imm_s_type),
+    .imm_b_type_o    (dec_raw.imm_b_type),
+    .imm_u_type_o    (dec_raw.imm_u_type),
+    .imm_j_type_o    (dec_raw.imm_j_type),
+    .zimm_rs1_type_o (dec_raw.zimm_rs1_type),
 
-    // register file
-    .rf_wdata_sel_o(rf_wdata_sel),
-    .rf_we_o       (rf_we_dec),
+    .rf_wdata_sel_o  (dec_raw.rf_wdata_sel),
+    .rf_we_o         (dec_raw.rf_we),
+    .rf_raddr_a_o    (dec_raw.rf_raddr_a),
+    .rf_raddr_b_o    (dec_raw.rf_raddr_b),
+    .rf_waddr_o      (dec_raw.rf_waddr),
+    .rf_ren_a_o      (dec_raw.rf_ren_a),
+    .rf_ren_b_o      (dec_raw.rf_ren_b),
 
-    .rf_raddr_a_o(rf_raddr_a_o),
-    .rf_raddr_b_o(rf_raddr_b_o),
-    .rf_waddr_o  (rf_waddr_id_o),
-    .rf_ren_a_o  (rf_ren_a_dec),
-    .rf_ren_b_o  (rf_ren_b_dec),
+    .alu_operator_o     (dec_raw.alu_operator),
+    .alu_op_a_mux_sel_o (dec_raw.alu_op_a_mux_sel),
+    .alu_op_b_mux_sel_o (dec_raw.alu_op_b_mux_sel),
+    .alu_multicycle_o   (dec_raw.alu_multicycle),
 
-    // ALU
-    .alu_operator_o    (alu_operator),
-    .alu_op_a_mux_sel_o(alu_op_a_mux_sel_dec),
-    .alu_op_b_mux_sel_o(alu_op_b_mux_sel_dec),
-    .alu_multicycle_o  (alu_multicycle_dec),
+    .mult_en_o            (dec_raw.mult_en),
+    .div_en_o             (dec_raw.div_en),
+    .mult_sel_o           (dec_raw.mult_sel),
+    .div_sel_o            (dec_raw.div_sel),
+    .multdiv_operator_o   (dec_raw.multdiv_operator),
+    .multdiv_signed_mode_o(dec_raw.multdiv_signed_mode),
 
-    // MULT & DIV
-    .mult_en_o            (mult_en_dec),
-    .div_en_o             (div_en_dec),
-    .mult_sel_o           (mult_sel_ex_o),
-    .div_sel_o            (div_sel_ex_o),
-    .multdiv_operator_o   (multdiv_operator),
-    .multdiv_signed_mode_o(multdiv_signed_mode),
+    .csr_access_o (dec_raw.csr_access),
+    .csr_op_o     (dec_raw.csr_op),
+    .csr_addr_o   (dec_raw.csr_addr),
 
-    // CSRs
-    .csr_access_o(csr_access_o),
-    .csr_op_o    (csr_op_o),
-    .csr_addr_o  (csr_addr_o),
+    .data_req_o            (dec_raw.data_req),
+    .data_we_o             (dec_raw.data_we),
+    .data_type_o           (dec_raw.data_type),
+    .data_sign_extension_o (dec_raw.data_sign_extension),
 
-    // LSU
-    .data_req_o           (lsu_req_dec),
-    .data_we_o            (lsu_we),
-    .data_type_o          (lsu_type),
-    .data_sign_extension_o(lsu_sign_ext),
-
-    // jump/branches
-    .jump_in_dec_o  (jump_in_dec),
-    .branch_in_dec_o(branch_in_dec)
+    .jump_in_dec_o   (dec_raw.jump_in_dec),
+    .branch_in_dec_o (dec_raw.branch_in_dec)
   );
+
+  assign dec_raw.sel_result_ex = dec_raw.rf_wdata_sel == RF_WD_EX;
+  assign dec_raw.sel_result_cs = dec_raw.rf_wdata_sel == RF_WD_CSR;
+  
+  // DCR module
+  DCR #(
+    .IS_POSEDGE(0),
+    .N($bits(decoder_out_t)) 
+  ) dcr_decoder_buffer (
+    .clk   (clk_i),
+    .EN    (1'b1),
+    .RST_N (rst_ni),
+    .D     (dec_raw),
+    .Q     (dec_pipelined)
+  );
+
+  logic [31:0] res_ex;
+  logic [31:0] res_cs;
+  AND_gate #(.N(32)) u_res_ex (.A1(result_ex_i), .A2({32{dec_pipelined.sel_result_ex}}), .ZN(res_ex));
+  AND_gate #(.N(32)) u_res_cs (.A1(csr_rdata_i), .A2({32{dec_pipelined.sel_result_cs}}), .ZN(res_cs));
+  assign rf_wdata_id_o = res_ex | res_cs;
+
+  always_latch begin
+    if (clk_i) begin
+      ebrk_insn <= ebrk_insn_imm;
+    end
+  end
+
+  // Unpack the output bus into the signals
+  // dec_raw is valid during the first half of every clock cycle, while dec_pipelined is valid during the second half.
+  // We use an OR-gate to combine them for critical control signals to ensure validity across the whole cycle.
+  // We mask dec_raw with clk_i to ensure it is 0 during the second half of the cycle.
+  // Note: newer Verilator versions reject the implicit logic-to-enum conversions below (ENUMVALUE), they might need an explicit cast.
+  assign illegal_insn_dec      = (dec_raw.illegal_insn & clk_i) | dec_pipelined.illegal_insn;
+  assign mret_insn_dec         = (dec_raw.mret_insn & clk_i) | dec_pipelined.mret_insn;
+  assign dret_insn_dec         = (dec_raw.dret_insn & clk_i) | dec_pipelined.dret_insn;
+  assign ecall_insn_dec        = (dec_raw.ecall_insn & clk_i) | dec_pipelined.ecall_insn;
+  assign wfi_insn_dec          = (dec_raw.wfi_insn & clk_i) | dec_pipelined.wfi_insn;
+  assign jump_set_dec          = (dec_raw.jump_set & clk_i) | dec_pipelined.jump_set;
+  assign icache_inval_o        = (dec_raw.icache_inval & clk_i) | dec_pipelined.icache_inval;
+  assign imm_a_mux_sel         = (dec_raw.imm_a_mux_sel & {$bits(imm_a_sel_e){clk_i}}) | dec_pipelined.imm_a_mux_sel; 
+  assign imm_b_mux_sel_dec     = (dec_raw.imm_b_mux_sel & {$bits(imm_b_sel_e){clk_i}}) | dec_pipelined.imm_b_mux_sel; 
+  assign bt_a_mux_sel          = (dec_raw.bt_a_mux_sel & {$bits(op_a_sel_e){clk_i}}) | dec_pipelined.bt_a_mux_sel; 
+  assign bt_b_mux_sel          = (dec_raw.bt_b_mux_sel & {$bits(imm_b_sel_e){clk_i}}) | dec_pipelined.bt_b_mux_sel; 
+  assign imm_i_type            = (dec_raw.imm_i_type & {32{clk_i}}) | dec_pipelined.imm_i_type; 
+  assign imm_s_type            = (dec_raw.imm_s_type & {32{clk_i}}) | dec_pipelined.imm_s_type; 
+  assign imm_b_type            = (dec_raw.imm_b_type & {32{clk_i}}) | dec_pipelined.imm_b_type; 
+  assign imm_u_type            = (dec_raw.imm_u_type & {32{clk_i}}) | dec_pipelined.imm_u_type; 
+  assign imm_j_type            = (dec_raw.imm_j_type & {32{clk_i}}) | dec_pipelined.imm_j_type; 
+  assign zimm_rs1_type         = (dec_raw.zimm_rs1_type & {32{clk_i}}) | dec_pipelined.zimm_rs1_type; 
+  assign rf_wdata_sel          = (dec_raw.rf_wdata_sel & {$bits(rf_wd_sel_e){clk_i}}) | dec_pipelined.rf_wdata_sel; 
+  assign rf_we_dec             = (dec_raw.rf_we & clk_i) | dec_pipelined.rf_we; 
+  assign rf_raddr_a_o          = dec_raw.rf_raddr_a;  // Required in first half, DCR is in Reg File (capturing one-hot encoding).
+  assign rf_raddr_b_o          = dec_raw.rf_raddr_b;  // Required in first half, DCR is in Reg File (capturing one-hot encoding).
+  assign rf_waddr_id_o         = (dec_raw.rf_waddr & {5{clk_i}}) | dec_pipelined.rf_waddr; 
+  assign rf_ren_a_dec          = (dec_raw.rf_ren_a & clk_i) | dec_pipelined.rf_ren_a;
+  assign rf_ren_b_dec          = (dec_raw.rf_ren_b & clk_i) | dec_pipelined.rf_ren_b;
+  assign alu_operator          = (dec_raw.alu_operator & {$bits(ibex_pkg::alu_op_e){clk_i}}) | dec_pipelined.alu_operator; // Required in first half, DCR is in ALU. Required in the second half, to configure operations inside ALU
+  assign alu_op_a_mux_sel_dec  = (dec_raw.alu_op_a_mux_sel & {$bits(op_a_sel_e){clk_i}}) | dec_pipelined.alu_op_a_mux_sel;  // Used to select alu_operand_a. This might leak. But only PC / Imm / Addr,...
+  assign alu_op_b_mux_sel_dec  = (dec_raw.alu_op_b_mux_sel & {$bits(op_b_sel_e){clk_i}}) | dec_pipelined.alu_op_b_mux_sel; 
+  assign alu_multicycle_dec    = (dec_raw.alu_multicycle & clk_i) | dec_pipelined.alu_multicycle;
+  assign mult_en_dec           = dec_pipelined.mult_en; // Need to remove raw ?
+  assign div_en_dec            = dec_pipelined.div_en;
+  assign mult_sel_ex_o         = (dec_raw.mult_sel & clk_i) | dec_pipelined.mult_sel; 
+  assign div_sel_ex_o          = (dec_raw.div_sel & clk_i) | dec_pipelined.div_sel;
+  assign multdiv_operator      = (dec_raw.multdiv_operator & {$bits(md_op_e){clk_i}}) | dec_pipelined.multdiv_operator;  // Needs to be DCR, due to horizontal probes.
+  assign multdiv_signed_mode   = (dec_raw.multdiv_signed_mode & {2{clk_i}}) | dec_pipelined.multdiv_signed_mode; 
+  assign csr_access_o          = (dec_raw.csr_access & clk_i) | dec_pipelined.csr_access;
+  assign csr_op_o              = (dec_raw.csr_op & {$bits(csr_op_e){clk_i}}) | dec_pipelined.csr_op;
+  assign csr_addr_o            = (dec_raw.csr_addr & {$bits(csr_num_e){clk_i}}) | dec_pipelined.csr_addr;
+  assign lsu_req_dec           = (dec_raw.data_req & clk_i) | dec_pipelined.data_req;
+  assign lsu_we                = (dec_raw.data_we & clk_i) | dec_pipelined.data_we; 
+  assign lsu_type              = (dec_raw.data_type & {2{clk_i}}) | dec_pipelined.data_type; 
+  assign lsu_sign_ext          = (dec_raw.data_sign_extension) | dec_pipelined.data_sign_extension; 
+  assign jump_in_dec           = (dec_raw.jump_in_dec & clk_i) | dec_pipelined.jump_in_dec;
+  assign branch_in_dec         = (dec_raw.branch_in_dec & clk_i) | dec_pipelined.branch_in_dec;
 
   // Flush pipe on most CSR modification. Some CSR modifications alter how instructions execute
   // (e.g. the PMP CSRs) so this ensures all instructions always see the latest architectural state
@@ -564,7 +723,7 @@ module ibex_id_stage #(
 
     // from IF-ID pipeline
     .instr_valid_i          (instr_valid_i),
-    .instr_i                (instr_rdata_i),
+    .instr_i                (instr_rdata_alu_i),
     .instr_compressed_i     (instr_rdata_c_i),
     .instr_is_compressed_i  (instr_is_compressed_i),
     .instr_bp_taken_i       (instr_bp_taken_i),
@@ -663,8 +822,9 @@ module ibex_id_stage #(
 
   assign multdiv_operator_ex_o       = multdiv_operator;
   assign multdiv_signed_mode_ex_o    = multdiv_signed_mode;
-  assign multdiv_operand_a_ex_o      = rf_rdata_a_fwd;
-  assign multdiv_operand_b_ex_o      = rf_rdata_b_fwd;
+  AND_gate #(.N(32)) u_multdiv_operand_a_and (.A1(rf_rdata_a_fwd), .A2({32{dec_pipelined.mult_sel||dec_pipelined.div_sel}}), .ZN(multdiv_operand_a_ex_o));
+  AND_gate #(.N(32)) u_multdiv_operand_b_and (.A1(rf_rdata_b_fwd), .A2({32{dec_pipelined.mult_sel||dec_pipelined.div_sel}}), .ZN(multdiv_operand_b_ex_o));
+
 
   ////////////////////////
   // Branch set control //
@@ -990,8 +1150,25 @@ module ibex_id_stage #(
     // If instruction is read register that writeback is writing forward writeback data to read
     // data. Note this doesn't factor in load data as it arrives too late, such hazards are
     // resolved via a stall (see above).
-    assign rf_rdata_a_fwd = rf_rd_a_wb_match & rf_write_wb_i ? rf_wdata_fwd_wb_i : rf_rdata_a_i;
-    assign rf_rdata_b_fwd = rf_rd_b_wb_match & rf_write_wb_i ? rf_wdata_fwd_wb_i : rf_rdata_b_i;
+    assign dec_raw.wb_match_a = rf_rd_a_wb_match & rf_write_wb_i;
+    assign dec_raw.wb_match_b = rf_rd_b_wb_match & rf_write_wb_i;
+    assign dec_raw.wb_notmatches_a = ~dec_raw.wb_match_a;
+    assign dec_raw.wb_notmatches_b = ~dec_raw.wb_match_b;
+
+    logic [31:0] rf_a_blinded;
+    logic [31:0] rf_b_blinded;
+    logic [31:0] fwd_a_blinded;
+    logic [31:0] fwd_b_blinded;
+
+    AND_gate #(.N(32)) u_rf_a_blinded   (.A1(rf_rdata_a_i),  .A2({32{dec_pipelined.wb_notmatches_a}}),   .ZN(rf_a_blinded));
+    AND_gate #(.N(32)) u_rf_b_blinded   (.A1(rf_rdata_b_i),  .A2({32{dec_pipelined.wb_notmatches_b}}),   .ZN(rf_b_blinded));
+    AND_gate #(.N(32)) u_wb_a_blinded   (.A1(rf_wdata_fwd_wb_i),  .A2({32{dec_pipelined.wb_match_a}}),   .ZN(fwd_a_blinded));
+    AND_gate #(.N(32)) u_wb_b_blinded   (.A1(rf_wdata_fwd_wb_i),  .A2({32{dec_pipelined.wb_match_b}}),   .ZN(fwd_b_blinded));
+
+    assign rf_rdata_a_fwd =  rf_a_blinded | fwd_a_blinded;
+    assign rf_rdata_b_fwd =  rf_b_blinded | fwd_b_blinded;
+    // assign rf_rdata_a_fwd = rf_rd_a_wb_match & rf_write_wb_i ? rf_wdata_fwd_wb_i : rf_rdata_a_i;
+    // assign rf_rdata_b_fwd = rf_rd_b_wb_match & rf_write_wb_i ? rf_wdata_fwd_wb_i : rf_rdata_b_i;
 
     assign stall_ld_hz = outstanding_load_wb_i & (rf_rd_a_hz | rf_rd_b_hz);
 

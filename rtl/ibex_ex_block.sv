@@ -2,6 +2,8 @@
 // Copyright 2018 ETH Zurich and University of Bologna, see also CREDITS.md.
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
+// Modified 2026 by Niels Wieser, TU Darmstadt:
+// countermeasures against micro-architectural leakage.
 
 /**
  * Execution stage
@@ -18,6 +20,7 @@ module ibex_ex_block #(
 
   // ALU
   input  ibex_pkg::alu_op_e     alu_operator_i,
+  input  logic                  can_skip_add_i,
   input  logic [31:0]           alu_operand_a_i,
   input  logic [31:0]           alu_operand_b_i,
   input  logic                  alu_instr_first_cycle_i,
@@ -68,6 +71,22 @@ module ibex_ex_block #(
   logic [33:0] multdiv_imd_val_d[2];
   logic [ 1:0] multdiv_imd_val_we;
 
+
+
+
+  typedef struct packed {
+    logic res_alu;     
+    logic res_mul;      
+  } operator_mux_out;
+
+  operator_mux_out op_raw, op_pipelined;
+
+
+
+
+
+
+
   /*
     The multdiv_i output is never selected if RV32M=RV32MNone
     At synthesis time, all the combinational and sequential logic
@@ -86,7 +105,30 @@ module ibex_ex_block #(
 
   assign alu_imd_val_q = '{imd_val_q_i[0][31:0], imd_val_q_i[1][31:0]};
 
-  assign result_ex_o  = multdiv_sel ? multdiv_result : alu_result;
+
+
+  // assign result_ex_o  = multdiv_sel ? multdiv_result : alu_result;
+
+  assign op_raw.res_mul = multdiv_sel;
+  assign op_raw.res_alu = ~multdiv_sel;
+  DCR #(
+    .IS_POSEDGE(0),
+    .N($bits(operator_mux_out)) 
+  ) precharge_phase (
+    .clk   (clk_i),
+    .EN    (1'b1),
+    .RST_N (rst_ni),
+    .D     (op_raw),
+    .Q     (op_pipelined)
+  );
+
+  logic [31:0] result_alu;
+  logic [31:0] result_mul;
+  AND_gate #(.N(32)) u_res_mult (.A1(multdiv_result), .A2({32{op_pipelined.res_mul}}), .ZN(result_mul));
+  AND_gate #(.N(32)) u_res_alu  (.A1(alu_result),     .A2({32{op_pipelined.res_alu}}), .ZN(result_alu));
+  assign result_ex_o = result_alu | result_mul;
+
+
 
   // branch handling
   assign branch_decision_o  = alu_cmp_result;
@@ -116,7 +158,10 @@ module ibex_ex_block #(
   ibex_alu #(
     .RV32B(RV32B)
   ) alu_i (
+    .clk_i              (clk_i),
+    .rst_ni             (rst_ni),
     .operator_i         (alu_operator_i),
+    .can_skip_add_i     (can_skip_add_i),
     .operand_a_i        (alu_operand_a_i),
     .operand_b_i        (alu_operand_b_i),
     .instr_first_cycle_i(alu_instr_first_cycle_i),

@@ -2,6 +2,8 @@
 // Copyright 2018 ETH Zurich and University of Bologna, see also CREDITS.md.
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
+// Modified 2026 by Niels Wieser, TU Darmstadt:
+// countermeasures against micro-architectural leakage.
 
 `ifdef RISCV_FORMAL
   `define RVFI
@@ -170,7 +172,7 @@ module ibex_top import ibex_pkg::*; #(
   localparam bit          DummyInstructions     = SecureIbex;
   localparam bit          RegFileECC            = SecureIbex;
   localparam bit          RegFileWrenCheck      = SecureIbex;
-  localparam bit          RegFileRdataMuxCheck  = SecureIbex;
+  localparam bit          RegFileRdataMuxCheck  = 1'b1; //SecureIbex;
   localparam int unsigned RegFileDataWidth      = RegFileECC ? 32 + 7 : 32;
   localparam bit          MemECC                = SecureIbex;
   localparam int unsigned MemDataWidth          = MemECC ? 32 + 7 : 32;
@@ -260,12 +262,16 @@ module ibex_top import ibex_pkg::*; #(
 
   assign core_sleep_o = ~clock_en;
 
-  prim_clock_gating core_clock_gate_i (
-    .clk_i    (clk_i),
-    .en_i     (clock_en),
-    .test_en_i(test_en_i),
-    .clk_o    (clk)
-  );
+  `ifdef TARGET_ASIC
+    assign clk = clk_i;
+  `else
+    prim_clock_gating core_clock_gate_i (
+      .clk_i    (clk_i),
+      .en_i     (clock_en),
+      .test_en_i(test_en_i),
+      .clk_o    (clk)
+    );
+  `endif
 
   ////////////////////////
   // Core instantiation //

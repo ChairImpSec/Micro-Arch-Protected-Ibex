@@ -1,6 +1,8 @@
 # Copyright lowRISC contributors.
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
+# Modified 2026 by Niels Wieser, TU Darmstadt:
+# countermeasures against micro-architectural leakage.
 
 # Ibex named configurations, each configuration must specify the same set of
 # parameters.
@@ -20,7 +22,7 @@ small:
   RV32E                    : 0
   RV32M                    : "ibex_pkg::RV32MFast"
   RV32B                    : "ibex_pkg::RV32BNone"
-  RegFile                  : "ibex_pkg::RegFileFF"
+  RegFile                  : "ibex_pkg::RegFileLatch"
   BranchTargetALU          : 0
   WritebackStage           : 0
   ICache                   : 0

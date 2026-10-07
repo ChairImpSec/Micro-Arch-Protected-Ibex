@@ -2,6 +2,8 @@
 // Copyright 2018 ETH Zurich and University of Bologna, see also CREDITS.md.
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
+// Modified 2026 by Niels Wieser, TU Darmstadt:
+// countermeasures against micro-architectural leakage.
 
 /**
  * Fetch Fifo for 32 bit memory interface
@@ -150,19 +152,23 @@ module ibex_fetch_fifo #(
                                   instr_addr_next;
 
   if (ResetAll) begin : g_instr_addr_ra
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        instr_addr_q <= '0;
-      end else if (instr_addr_en) begin
-        instr_addr_q <= instr_addr_d;
-      end
-    end
+    DFFE_cell #(.N(31)) u_instr_addr_reg (
+      .CK    (clk_i),
+      .D     (instr_addr_d),
+      .EN    (instr_addr_en),
+      .RST_N (rst_ni),
+      .Q     (instr_addr_q),
+      .QN    ()
+    );
   end else begin : g_instr_addr_nr
-    always_ff @(posedge clk_i) begin
-      if (instr_addr_en) begin
-        instr_addr_q <= instr_addr_d;
-      end
-    end
+    DFFE_cell #(.N(31)) u_instr_addr_reg (
+      .CK    (clk_i),
+      .D     (instr_addr_d),
+      .EN    (instr_addr_en),
+      .RST_N (1'b1),
+      .Q     (instr_addr_q),
+      .QN    ()
+    );
   end
 
   // Output PC of current instruction
@@ -235,22 +241,23 @@ module ibex_fetch_fifo #(
 
   for (genvar i = 0; i < DEPTH; i++) begin : g_fifo_regs
     if (ResetAll) begin : g_rdata_ra
-      always_ff @(posedge clk_i or negedge rst_ni) begin
-        if (!rst_ni) begin
-          rdata_q[i] <= '0;
-          err_q[i]   <= '0;
-        end else if (entry_en[i]) begin
-          rdata_q[i] <= rdata_d[i];
-          err_q[i]   <= err_d[i];
-        end
-      end
+      DFFE_cell #(.N(33)) u_grouped_reg (
+        .CK    (clk_i),
+        .D     ({rdata_d[i], err_d[i]}),
+        .EN    (entry_en[i]),
+        .RST_N (rst_ni),
+        .Q     ({rdata_q[i], err_q[i]}),
+        .QN    ()
+      );
     end else begin : g_rdata_nr
-      always_ff @(posedge clk_i) begin
-        if (entry_en[i]) begin
-          rdata_q[i] <= rdata_d[i];
-          err_q[i]   <= err_d[i];
-        end
-      end
+      DFFE_cell #(.N(33)) u_grouped_reg (
+        .CK    (clk_i),
+        .D     ({rdata_d[i], err_d[i]}),
+        .EN    (entry_en[i]),
+        .RST_N (1'b1),
+        .Q     ({rdata_q[i], err_q[i]}),
+        .QN    ()
+      );
     end
   end
 

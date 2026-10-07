@@ -1,6 +1,8 @@
 // Copyright lowRISC contributors.
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
+// Modified 2026 by Niels Wieser, TU Darmstadt:
+// countermeasures against micro-architectural leakage.
 
 /**
  * Writeback Stage
@@ -105,7 +107,7 @@ module ibex_wb_stage #(
         if (!rst_ni) begin
           rf_we_wb_q      <= '0;
           rf_waddr_wb_q   <= '0;
-          rf_wdata_wb_q   <= '0;
+          // rf_wdata_wb_q   <= '0;
           wb_instr_type_q <= wb_instr_type_e'(0);
           wb_pc_q         <= '0;
           wb_compressed_q <= '0;
@@ -113,7 +115,7 @@ module ibex_wb_stage #(
         end else if (en_wb_i) begin
           rf_we_wb_q      <= rf_we_id_i;
           rf_waddr_wb_q   <= rf_waddr_id_i;
-          rf_wdata_wb_q   <= rf_wdata_id_i;
+          // rf_wdata_wb_q   <= rf_wdata_id_i;
           wb_instr_type_q <= instr_type_wb_i;
           wb_pc_q         <= pc_id_i;
           wb_compressed_q <= instr_is_compressed_id_i;
@@ -125,7 +127,7 @@ module ibex_wb_stage #(
         if (en_wb_i) begin
           rf_we_wb_q      <= rf_we_id_i;
           rf_waddr_wb_q   <= rf_waddr_id_i;
-          rf_wdata_wb_q   <= rf_wdata_id_i;
+          // rf_wdata_wb_q   <= rf_wdata_id_i;
           wb_instr_type_q <= instr_type_wb_i;
           wb_pc_q         <= pc_id_i;
           wb_compressed_q <= instr_is_compressed_id_i;
@@ -134,6 +136,27 @@ module ibex_wb_stage #(
       end
     end
 
+  logic [31:0] rf_wdata_id_pipeline;
+  DCR #(
+    .IS_POSEDGE(1),
+    .N(32)
+  ) precharge_phase (
+    .clk (clk_i),
+    .EN  (en_wb_i),
+    .RST_N (rst_ni),
+    .D   (rf_wdata_id_i),
+    .Q   (rf_wdata_id_pipeline)
+  );
+    DCR #(
+    .IS_POSEDGE(0),
+    .N(32)
+    ) pipeline_phase (
+    .clk (clk_i),
+    .EN  (1'b1),
+    .RST_N (rst_ni),
+    .D   (rf_wdata_id_pipeline),
+    .Q   (rf_wdata_wb_q)
+  );
     assign rf_waddr_wb_o         = rf_waddr_wb_q;
     assign rf_wdata_wb_mux[0]    = rf_wdata_wb_q;
     assign rf_wdata_wb_mux_we[0] = rf_we_wb_q & wb_valid_q;
@@ -161,7 +184,7 @@ module ibex_wb_stage #(
                                                  ~(lsu_resp_valid_i & lsu_resp_err_i);
     assign perf_instr_ret_compressed_wb_o      = perf_instr_ret_wb_o & wb_compressed_q;
 
-    // Forward data that will be written to the RF back to ID to resolve data hazards. The flopped
+    // Forward data that will be written to the RF back to ID to resolve data hazards.
     // rf_wdata_wb_q is used rather than rf_wdata_wb_o as the latter includes read data from memory
     // that returns too late to be used on the forwarding path.
     assign rf_wdata_fwd_wb_o = rf_wdata_wb_q;
@@ -242,8 +265,23 @@ module ibex_wb_stage #(
 
   // RF write data can come from ID results (all RF writes that aren't because of loads will come
   // from here) or the LSU (RF writes for load data)
-  assign rf_wdata_wb_o = ({32{rf_wdata_wb_mux_we[0]}} & rf_wdata_wb_mux[0]) |
-                         ({32{rf_wdata_wb_mux_we[1]}} & rf_wdata_wb_mux[1]);
+  logic we_0, we_1;
+  DCR #(
+    .IS_POSEDGE(0),
+    .N(2) 
+  ) precharge_phase (
+    .clk (clk_i),
+    .EN  (1'b1),
+    .RST_N (rst_ni),
+    .D   ({rf_wdata_wb_mux_we[0], (rf_wdata_wb_mux_we[1] && ! rf_wdata_wb_mux_we[0])}),
+    .Q   ({we_0, we_1})
+  );
+  logic [31:0] wb_data_alu;
+  logic [31:0] wb_data_lsu;
+  AND_gate #(.N(32)) u_wb_alu (.A1(rf_wdata_wb_mux[0]),    .A2({32{we_0}}),     .ZN(wb_data_alu));
+  AND_gate #(.N(32)) u_wb_lsu (.A1(rf_wdata_wb_mux[1]),    .A2({32{we_1}}),     .ZN(wb_data_lsu));
+  assign rf_wdata_wb_o = wb_data_alu | wb_data_lsu;
+
   assign rf_we_wb_o    = |rf_wdata_wb_mux_we;
 
   `DV_FCOV_SIGNAL_GEN_IF(logic, wb_valid, g_writeback_stage.wb_valid_q, WritebackStage)

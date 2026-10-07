@@ -2,6 +2,8 @@
 // Copyright 2018 ETH Zurich and University of Bologna, see also CREDITS.md.
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
+// Modified 2026 by Niels Wieser, TU Darmstadt:
+// countermeasures against micro-architectural leakage.
 
 `define OP_L 15:0
 `define OP_H 31:16
@@ -25,8 +27,8 @@ module ibex_multdiv_fast #(
   input  logic             div_sel_i,  // static decoder output, for data muxes
   input  ibex_pkg::md_op_e operator_i,
   input  logic  [1:0]      signed_mode_i,
-  input  logic [31:0]      op_a_i,
-  input  logic [31:0]      op_b_i,
+  input  logic [31:0]      op_a_i, // Already blinded inside id_stage
+  input  logic [31:0]      op_b_i, // Already blinded inside id_stage
   input  logic [33:0]      alu_adder_ext_i,
   input  logic [31:0]      alu_adder_i,
   input  logic             equal_to_zero_i,
@@ -98,21 +100,14 @@ module ibex_multdiv_fast #(
   assign mult_en_internal = mult_en_i & ~mult_hold;
   assign div_en_internal  = div_en_i & ~div_hold;
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      div_counter_q    <= '0;
-      md_state_q       <= MD_IDLE;
-      op_numerator_q   <= '0;
-      op_quotient_q    <= '0;
-      div_by_zero_q    <= '0;
-    end else if (div_en_internal) begin
-      div_counter_q    <= div_counter_d;
-      op_numerator_q   <= op_numerator_d;
-      op_quotient_q    <= op_quotient_d;
-      md_state_q       <= md_state_d;
-      div_by_zero_q    <= div_by_zero_d;
-    end
-  end
+  DFFE_cell #(.N(5 + 3 + 32 + 32 + 1)) u_div_regs (
+    .CK    (clk_i),
+    .D     ({div_counter_d, md_state_d, op_numerator_d, op_quotient_d, div_by_zero_d}),
+    .EN    (div_en_internal),
+    .RST_N (rst_ni),
+    .Q     ({div_counter_q, md_state_q, op_numerator_q, op_quotient_q, div_by_zero_q}),
+    .QN    ()
+  );
 
   `ASSERT_KNOWN(DivEnKnown, div_en_internal)
   `ASSERT_KNOWN(MultEnKnown, mult_en_internal)
@@ -242,15 +237,14 @@ module ibex_multdiv_fast #(
       endcase // mult_state_q
     end
 
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        mult_state_q <= MULL;
-      end else begin
-        if (mult_en_internal) begin
-          mult_state_q <= mult_state_d;
-        end
-      end
-    end
+    DFFE_cell #(.N(1)) u_mult_state_reg (
+      .CK    (clk_i),
+      .D     (mult_state_d),
+      .EN    (mult_en_internal),
+      .RST_N (rst_ni),
+      .Q     (mult_state_q),
+      .QN    ()
+    );
 
     assign unused_mult1_res_uns = mult1_res_uns[33:32];
 
@@ -364,15 +358,14 @@ module ibex_multdiv_fast #(
       endcase // mult_state_q
     end
 
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        mult_state_q <= ALBL;
-      end else begin
-        if (mult_en_internal) begin
-          mult_state_q <= mult_state_d;
-        end
-      end
-    end
+    DFFE_cell #(.N(2)) u_mult_state_reg (
+      .CK    (clk_i),
+      .D     (mult_state_d),
+      .EN    (mult_en_internal),
+      .RST_N (rst_ni),
+      .Q     (mult_state_q),
+      .QN    ()
+    );
 
     // States must be known/valid.
     `ASSERT_KNOWN(IbexMultStateKnown, mult_state_q)

@@ -1,6 +1,8 @@
 // Copyright lowRISC contributors.
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
+// Modified 2026 by Niels Wieser, TU Darmstadt:
+// countermeasures against micro-architectural leakage.
 
 /**
  * Instruction cache
@@ -217,19 +219,23 @@ module ibex_icache import ibex_pkg::*; #(
   assign prefetch_addr_en    = branch_i | lookup_grant_ic0;
 
   if (ResetAll) begin : g_prefetch_addr_ra
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        prefetch_addr_q <= '0;
-      end else if (prefetch_addr_en) begin
-        prefetch_addr_q <= prefetch_addr_d;
-      end
-    end
+    DFFE_cell #(.N(ADDR_W)) u_prefetch_addr_reg (
+      .CK    (clk_i),
+      .D     (prefetch_addr_d),
+      .EN    (prefetch_addr_en),
+      .RST_N (rst_ni),
+      .Q     (prefetch_addr_q),
+      .QN    ()
+    );
   end else begin : g_prefetch_addr_nr
-    always_ff @(posedge clk_i) begin
-      if (prefetch_addr_en) begin
-        prefetch_addr_q <= prefetch_addr_d;
-      end
-    end
+    DFFE_cell #(.N(ADDR_W)) u_prefetch_addr_reg (
+      .CK    (clk_i),
+      .D     (prefetch_addr_d),
+      .EN    (prefetch_addr_en),
+      .RST_N (1'b1),
+      .Q     (prefetch_addr_q),
+      .QN    ()
+    );
   end
 
   ////////////////////////
@@ -338,22 +344,23 @@ module ibex_icache import ibex_pkg::*; #(
   end
 
   if (ResetAll) begin : g_lookup_addr_ra
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        lookup_addr_ic1 <= '0;
-        fill_in_ic1     <= '0;
-      end else if (lookup_grant_ic0) begin
-        lookup_addr_ic1 <= lookup_addr_ic0[ADDR_W-1:IC_INDEX_HI+1];
-        fill_in_ic1     <= fill_alloc_sel;
-      end
-    end
+    DFFE_cell #(.N(ADDR_W - (IC_INDEX_HI + 1) + NUM_FB)) u_grouped_lookup_reg (
+      .CK    (clk_i),
+      .D     ({lookup_addr_ic0[ADDR_W-1:IC_INDEX_HI+1], fill_alloc_sel}),
+      .EN    (lookup_grant_ic0),
+      .RST_N (rst_ni),
+      .Q     ({lookup_addr_ic1, fill_in_ic1}),
+      .QN    ()
+    );
   end else begin : g_lookup_addr_nr
-    always_ff @(posedge clk_i) begin
-      if (lookup_grant_ic0) begin
-        lookup_addr_ic1 <= lookup_addr_ic0[ADDR_W-1:IC_INDEX_HI+1];
-        fill_in_ic1     <= fill_alloc_sel;
-      end
-    end
+    DFFE_cell #(.N(ADDR_W - (IC_INDEX_HI + 1) + NUM_FB)) u_grouped_lookup_reg (
+      .CK    (clk_i),
+      .D     ({lookup_addr_ic0[ADDR_W-1:IC_INDEX_HI+1], fill_alloc_sel}),
+      .EN    (lookup_grant_ic0),
+      .RST_N (1'b1),
+      .Q     ({lookup_addr_ic1, fill_in_ic1}),
+      .QN    ()
+    );
   end
 
   ////////////////////////
@@ -389,13 +396,14 @@ module ibex_icache import ibex_pkg::*; #(
     assign round_robin_way_ic1[way]    = round_robin_way_q[way-1];
   end
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      round_robin_way_q <= {{IC_NUM_WAYS-1{1'b0}}, 1'b1};
-    end else if (lookup_valid_ic1) begin
-      round_robin_way_q <= round_robin_way_ic1;
-    end
-  end
+  DFFE_cell #(.N(IC_NUM_WAYS)) u_round_robin_way_reg (
+    .CK    (clk_i),
+    .D     (round_robin_way_ic1),
+    .EN    (lookup_valid_ic1),
+    .RST_N (rst_ni),
+    .Q     (round_robin_way_q),
+    .QN    ()
+  );
 
   assign sel_way_ic1 = |tag_invalid_ic1 ? lowest_invalid_way_ic1 :
                                           round_robin_way_q;
@@ -485,22 +493,23 @@ module ibex_icache import ibex_pkg::*; #(
 
     // Store the ways with errors to be invalidated
     if (ResetAll) begin : g_ecc_correction_ra
-      always_ff @(posedge clk_i or negedge rst_ni) begin
-        if (!rst_ni) begin
-          ecc_correction_ways_q  <= '0;
-          ecc_correction_index_q <= '0;
-        end else if (ecc_err_ic1) begin
-          ecc_correction_ways_q  <= ecc_correction_ways_d;
-          ecc_correction_index_q <= lookup_index_ic1;
-        end
-      end
+      DFFE_cell #(.N(IC_NUM_WAYS + IC_INDEX_W)) u_ecc_regs (
+        .CK    (clk_i),
+        .D     ({ecc_correction_ways_d, lookup_index_ic1}),
+        .EN    (ecc_err_ic1),
+        .RST_N (rst_ni),
+        .Q     ({ecc_correction_ways_q, ecc_correction_index_q}),
+        .QN    ()
+      );
     end else begin : g_ecc_correction_nr
-      always_ff @(posedge clk_i) begin
-        if (ecc_err_ic1) begin
-          ecc_correction_ways_q  <= ecc_correction_ways_d;
-          ecc_correction_index_q <= lookup_index_ic1;
-        end
-      end
+      DFFE_cell #(.N(IC_NUM_WAYS + IC_INDEX_W)) u_ecc_regs (
+        .CK    (clk_i),
+        .D     ({ecc_correction_ways_d, lookup_index_ic1}),
+        .EN    (ecc_err_ic1),
+        .RST_N (1'b1),
+        .Q     ({ecc_correction_ways_q, ecc_correction_index_q}),
+        .QN    ()
+      );
     end
 
     assign ecc_write_req   = ecc_correction_write_q;
@@ -744,33 +753,18 @@ module ibex_icache import ibex_pkg::*; #(
     // Fill buffer general enable
     assign fill_entry_en[fb]   = fill_alloc[fb] | fill_busy_q[fb];
 
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        fill_busy_q[fb]     <= 1'b0;
-        fill_older_q[fb]    <= '0;
-        fill_stale_q[fb]    <= 1'b0;
-        fill_cache_q[fb]    <= 1'b0;
-        fill_hit_q[fb]      <= 1'b0;
-        fill_ext_cnt_q[fb]  <= '0;
-        fill_ext_hold_q[fb] <= 1'b0;
-        fill_ext_done_q[fb] <= 1'b0;
-        fill_rvd_cnt_q[fb]  <= '0;
-        fill_ram_done_q[fb] <= 1'b0;
-        fill_out_cnt_q[fb]  <= '0;
-      end else if (fill_entry_en[fb]) begin
-        fill_busy_q[fb]     <= fill_busy_d[fb];
-        fill_older_q[fb]    <= fill_older_d[fb];
-        fill_stale_q[fb]    <= fill_stale_d[fb];
-        fill_cache_q[fb]    <= fill_cache_d[fb];
-        fill_hit_q[fb]      <= fill_hit_d[fb];
-        fill_ext_cnt_q[fb]  <= fill_ext_cnt_d[fb];
-        fill_ext_hold_q[fb] <= fill_ext_hold_d[fb];
-        fill_ext_done_q[fb] <= fill_ext_done_d[fb];
-        fill_rvd_cnt_q[fb]  <= fill_rvd_cnt_d[fb];
-        fill_ram_done_q[fb] <= fill_ram_done_d[fb];
-        fill_out_cnt_q[fb]  <= fill_out_cnt_d[fb];
-      end
-    end
+    DFFE_cell #(.N(1 + NUM_FB + 1 + 1 + 1 + (IC_LINE_BEATS_W+1) + 1 + 1 + (IC_LINE_BEATS_W+1) + 1 + (IC_LINE_BEATS_W+1))) u_fill_regs (
+      .CK    (clk_i),
+      .D     ({fill_busy_d[fb], fill_older_d[fb], fill_stale_d[fb], fill_cache_d[fb], fill_hit_d[fb],
+               fill_ext_cnt_d[fb], fill_ext_hold_d[fb], fill_ext_done_d[fb], fill_rvd_cnt_d[fb],
+               fill_ram_done_d[fb], fill_out_cnt_d[fb]}),
+      .EN    (fill_entry_en[fb]),
+      .RST_N (rst_ni),
+      .Q     ({fill_busy_q[fb], fill_older_q[fb], fill_stale_q[fb], fill_cache_q[fb], fill_hit_q[fb],
+               fill_ext_cnt_q[fb], fill_ext_hold_q[fb], fill_ext_done_q[fb], fill_rvd_cnt_q[fb],
+               fill_ram_done_q[fb], fill_out_cnt_q[fb]}),
+      .QN    ()
+    );
 
     ////////////////////////////////////////
     // Fill buffer address / data storage //
@@ -780,28 +774,33 @@ module ibex_icache import ibex_pkg::*; #(
     assign fill_way_en[fb]     = (lookup_valid_ic1 & fill_in_ic1[fb]);
 
     if (ResetAll) begin : g_fill_addr_ra
-      always_ff @(posedge clk_i or negedge rst_ni) begin
-        if (!rst_ni) begin
-          fill_addr_q[fb] <= '0;
-        end else if (fill_addr_en[fb]) begin
-          fill_addr_q[fb] <= lookup_addr_ic0;
-        end
-      end
+      DFFE_cell #(.N(ADDR_W)) u_fill_addr_reg (
+        .CK    (clk_i),
+        .D     (lookup_addr_ic0),
+        .EN    (fill_addr_en[fb]),
+        .RST_N (rst_ni),
+        .Q     (fill_addr_q[fb]),
+        .QN    ()
+      );
     end else begin : g_fill_addr_nr
-      always_ff @(posedge clk_i) begin
-        if (fill_addr_en[fb]) begin
-          fill_addr_q[fb] <= lookup_addr_ic0;
-        end
-      end
+      DFFE_cell #(.N(ADDR_W)) u_fill_addr_reg (
+        .CK    (clk_i),
+        .D     (lookup_addr_ic0),
+        .EN    (fill_addr_en[fb]),
+        .RST_N (1'b1),
+        .Q     (fill_addr_q[fb]),
+        .QN    ()
+      );
     end
 
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        fill_way_q[fb]  <= '0;
-      end else if (fill_way_en[fb]) begin
-        fill_way_q[fb]  <= sel_way_ic1;
-      end
-    end
+    DFFE_cell #(.N(IC_NUM_WAYS)) u_fill_way_reg (
+      .CK    (clk_i),
+      .D     (sel_way_ic1),
+      .EN    (fill_way_en[fb]),
+      .RST_N (rst_ni),
+      .Q     (fill_way_q[fb]),
+      .QN    ()
+    );
 
     // Data either comes from the cache or the bus. If there was an ECC error, we must take
     // the incoming bus data since the cache hit data is corrupted.
@@ -815,13 +814,14 @@ module ibex_icache import ibex_pkg::*; #(
       //                           Hold the error once recorded
                                    (fill_busy_q[fb] & fill_err_q[fb][b]);
 
-      always_ff @(posedge clk_i or negedge rst_ni) begin
-        if (!rst_ni) begin
-          fill_err_q[fb][b] <= '0;
-        end else if (fill_entry_en[fb]) begin
-          fill_err_q[fb][b] <= fill_err_d[fb][b];
-        end
-      end
+      DFFE_cell #(.N(1)) u_fill_err_reg (
+        .CK    (clk_i),
+        .D     (fill_err_d[fb][b]),
+        .EN    (fill_entry_en[fb]),
+        .RST_N (rst_ni),
+        .Q     (fill_err_q[fb][b]),
+        .QN    ()
+      );
 
       // Enable the relevant part of the data register (or all for cache hits)
       // Ignore incoming rvalid data when we already have cache hit data
@@ -830,19 +830,23 @@ module ibex_icache import ibex_pkg::*; #(
                                     (fill_rvd_off[fb] == b[IC_LINE_BEATS_W-1:0]));
 
       if (ResetAll) begin : g_fill_data_ra
-        always_ff @(posedge clk_i or negedge rst_ni) begin
-          if (!rst_ni) begin
-            fill_data_q[fb][b*BUS_SIZE+:BUS_SIZE] <= '0;
-          end else if (fill_data_en[fb][b]) begin
-            fill_data_q[fb][b*BUS_SIZE+:BUS_SIZE] <= fill_data_d[fb][b*BUS_SIZE+:BUS_SIZE];
-          end
-        end
+        DFFE_cell #(.N(32)) u_fill_data_reg (
+          .CK    (clk_i),
+          .D     (fill_data_d[fb][b*BUS_SIZE+:BUS_SIZE]),
+          .EN    (fill_data_en[fb][b]),
+          .RST_N (rst_ni),
+          .Q     (fill_data_q[fb][b*BUS_SIZE+:BUS_SIZE]),
+          .QN    ()
+        );
       end else begin : g_fill_data_nr
-        always_ff @(posedge clk_i) begin
-          if (fill_data_en[fb][b]) begin
-            fill_data_q[fb][b*BUS_SIZE+:BUS_SIZE] <= fill_data_d[fb][b*BUS_SIZE+:BUS_SIZE];
-          end
-        end
+        DFFE_cell #(.N(32)) u_fill_data_reg (
+          .CK    (clk_i),
+          .D     (fill_data_d[fb][b*BUS_SIZE+:BUS_SIZE]),
+          .EN    (fill_data_en[fb][b]),
+          .RST_N (1'b1),
+          .Q     (fill_data_q[fb][b*BUS_SIZE+:BUS_SIZE]),
+          .QN    ()
+        );
       end
 
     end
@@ -939,22 +943,23 @@ module ibex_icache import ibex_pkg::*; #(
   assign skid_en     = data_valid & (ready_i | skid_ready);
 
   if (ResetAll) begin : g_skid_data_ra
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        skid_data_q <= '0;
-        skid_err_q  <= '0;
-      end else if (skid_en) begin
-        skid_data_q <= skid_data_d;
-        skid_err_q  <= output_err;
-      end
-    end
+    DFFE_cell #(.N(16 + 1)) u_skid_regs (
+      .CK    (clk_i),
+      .D     ({skid_data_d, output_err}),
+      .EN    (skid_en),
+      .RST_N (rst_ni),
+      .Q     ({skid_data_q, skid_err_q}),
+      .QN    ()
+    );
   end else begin : g_skid_data_nr
-    always_ff @(posedge clk_i) begin
-      if (skid_en) begin
-        skid_data_q <= skid_data_d;
-        skid_err_q  <= output_err;
-      end
-    end
+    DFFE_cell #(.N(16 + 1)) u_skid_regs (
+      .CK    (clk_i),
+      .D     ({skid_data_d, output_err}),
+      .EN    (skid_en),
+      .RST_N (1'b1),
+      .Q     ({skid_data_q, skid_err_q}),
+      .QN    ()
+    );
   end
 
   // The data in the skid buffer is ready if it's a complete compressed instruction or if there's
@@ -1013,19 +1018,23 @@ module ibex_icache import ibex_pkg::*; #(
   assign output_addr_d = branch_i ? addr_i[31:1] : output_addr_incr;
 
   if (ResetAll) begin : g_output_addr_ra
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        output_addr_q <= '0;
-      end else if (output_addr_en) begin
-        output_addr_q <= output_addr_d;
-      end
-    end
+    DFFE_cell #(.N(31)) u_output_addr_reg (
+      .CK    (clk_i),
+      .D     (output_addr_d),
+      .EN    (output_addr_en),
+      .RST_N (rst_ni),
+      .Q     (output_addr_q),
+      .QN    ()
+    );
   end else begin : g_output_addr_nr
-    always_ff @(posedge clk_i) begin
-      if (output_addr_en) begin
-        output_addr_q <= output_addr_d;
-      end
-    end
+    DFFE_cell #(.N(31)) u_output_addr_reg (
+      .CK    (clk_i),
+      .D     (output_addr_d),
+      .EN    (output_addr_en),
+      .RST_N (1'b1),
+      .Q     (output_addr_q),
+      .QN    ()
+    );
   end
 
   // Mux the data from BUS_SIZE to halfword
@@ -1146,19 +1155,23 @@ module ibex_icache import ibex_pkg::*; #(
   end
 
   if (ResetAll) begin : g_inval_index_ra
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        inval_index_q <= '0;
-      end else if (inval_index_en) begin
-        inval_index_q <= inval_index_d;
-      end
-    end
+    DFFE_cell #(.N(IC_INDEX_W)) u_inval_index_reg (
+      .CK    (clk_i),
+      .D     (inval_index_d),
+      .EN    (inval_index_en),
+      .RST_N (rst_ni),
+      .Q     (inval_index_q),
+      .QN    ()
+    );
   end else begin : g_inval_index_nr
-    always_ff @(posedge clk_i) begin
-      if (inval_index_en) begin
-        inval_index_q <= inval_index_d;
-      end
-    end
+    DFFE_cell #(.N(IC_INDEX_W)) u_inval_index_reg (
+      .CK    (clk_i),
+      .D     (inval_index_d),
+      .EN    (inval_index_en),
+      .RST_N (1'b1),
+      .Q     (inval_index_q),
+      .QN    ()
+    );
   end
 
   /////////////////

@@ -2,6 +2,8 @@
 // Copyright 2018 ETH Zurich and University of Bologna, see also CREDITS.md.
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
+// Modified 2026 by Niels Wieser, TU Darmstadt:
+// countermeasures against micro-architectural leakage.
 
 /**
  * Slow Multiplier and Division
@@ -334,21 +336,14 @@ module ibex_multdiv_slow
 
   assign multdiv_en = (mult_en_i | div_en_i) & ~multdiv_hold;
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      multdiv_count_q  <= 5'h0;
-      op_b_shift_q     <= 33'h0;
-      op_a_shift_q     <= 33'h0;
-      md_state_q       <= MD_IDLE;
-      div_by_zero_q    <= 1'b0;
-    end else if (multdiv_en) begin
-      multdiv_count_q  <= multdiv_count_d;
-      op_b_shift_q     <= op_b_shift_d;
-      op_a_shift_q     <= op_a_shift_d;
-      md_state_q       <= md_state_d;
-      div_by_zero_q    <= div_by_zero_d;
-    end
-  end
+  DFFE_cell #(.N(5 + 33 + 33 + 3 + 1)) u_multdiv_regs (
+    .CK    (clk_i),
+    .D     ({multdiv_count_d, op_b_shift_d, op_a_shift_d, md_state_d, div_by_zero_d}),
+    .EN    (multdiv_en),
+    .RST_N (rst_ni),
+    .Q     ({multdiv_count_q, op_b_shift_q, op_a_shift_q, md_state_q, div_by_zero_q}),
+    .QN    ()
+  );
 
   /////////////
   // Outputs //

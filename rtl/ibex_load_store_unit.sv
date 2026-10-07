@@ -2,6 +2,8 @@
 // Copyright 2018 ETH Zurich and University of Bologna, see also CREDITS.md.
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
+// Modified 2026 by Niels Wieser, TU Darmstadt:
+// countermeasures against micro-architectural leakage.
 
 
 /**
@@ -186,29 +188,72 @@ module ibex_load_store_unit #(
   // RData alignment //
   /////////////////////
 
-  // register for unaligned rdata
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      rdata_q <= '0;
-    end else if (rdata_update) begin
-      rdata_q <= data_rdata_i[31:8];
-    end
-  end
 
   // registers for transaction control
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      rdata_offset_q  <= 2'h0;
-      data_type_q     <= 2'h0;
-      data_sign_ext_q <= 1'b0;
-      data_we_q       <= 1'b0;
-    end else if (ctrl_update) begin
-      rdata_offset_q  <= data_offset;
-      data_type_q     <= lsu_type_i;
-      data_sign_ext_q <= lsu_sign_ext_i;
-      data_we_q       <= lsu_we_i;
-    end
-  end
+  DFFE_cell #(.N(2 + 1 + 1)) u_ctrl_regs (
+    .CK    (clk_i),
+    .D     ({lsu_type_i, lsu_sign_ext_i, lsu_we_i}),
+    .EN    (ctrl_update),
+    .RST_N (rst_ni),
+    .Q     ({data_type_q, data_sign_ext_q, data_we_q}),
+    .QN    ()
+  );
+
+  DCR #(
+    .IS_POSEDGE(1),
+    .N(2)
+  ) offset_dcr (
+    .clk (clk_i),
+    .EN  (ctrl_update),
+    .RST_N (rst_ni),
+    .D   (data_offset),
+    .Q   (rdata_offset_q)
+  );
+
+
+  // registers for unaligned rdata
+  logic [31:8] rdata_pip;
+  DCR #(
+    .IS_POSEDGE(1),
+    .N(24)
+  ) reg_replacement (
+    .clk (clk_i),
+    .EN  (rdata_update),
+    .RST_N (rst_ni),
+    .D   (data_rdata_i[31:8]),
+    .Q   (rdata_pip)
+  );
+
+
+  logic [2:0] data_type_oh;
+  assign data_type_oh[0] = (data_type_q == 2'b00);
+  assign data_type_oh[1] = (data_type_q == 2'b01);
+  assign data_type_oh[2] = (data_type_q == 2'b10) || (data_type_q == 2'b11);
+
+  logic [3:0] rdata_offset_oh;
+  assign rdata_offset_oh[0] = (rdata_offset_q == 2'b00);
+  assign rdata_offset_oh[1] = (rdata_offset_q == 2'b01);
+  assign rdata_offset_oh[2] = (rdata_offset_q == 2'b10);
+  assign rdata_offset_oh[3] = (rdata_offset_q == 2'b11);
+
+  logic [1:0] data_sign_ext_oh;
+  assign data_sign_ext_oh[0] = ~data_sign_ext_q;
+  assign data_sign_ext_oh[1] =  data_sign_ext_q;
+
+  logic [2:0] data_type_oh_dcr;
+  logic [3:0] rdata_offset_oh_dcr;
+  logic [1:0] data_sign_ext_oh_dcr;
+
+  DCR #(
+    .IS_POSEDGE(0),
+    .N(24+3+4+2)
+  ) precharge_phase (
+    .clk (clk_i),
+    .EN  (1'b1),
+    .RST_N (rst_ni),
+    .D   ({rdata_pip, data_type_oh, rdata_offset_oh, data_sign_ext_oh}),
+    .Q   ({rdata_q, data_type_oh_dcr, rdata_offset_oh_dcr, data_sign_ext_oh_dcr})
+  );
 
   // Store last address for mtval + AGU for misaligned transactions.  Do not update in case of
   // errors, mtval needs the (first) failing address.  Where an aligned access or the first half of
@@ -216,116 +261,94 @@ module ibex_load_store_unit #(
   // a misaligned access provide the word aligned address of the second half.
   assign addr_last_d = addr_incr_req_o ? data_addr_w_aligned : data_addr;
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      addr_last_q <= '0;
-    end else if (addr_update) begin
-      addr_last_q <= addr_last_d;
-    end
-  end
+  logic [31:0] addr_last_pip;
+  DCR #(
+    .IS_POSEDGE(1),
+    .N(32)
+  ) addr_dcr (
+    .clk (clk_i),
+    .EN  (addr_update),
+    .RST_N (rst_ni),
+    .D   (addr_last_d),
+    .Q   (addr_last_pip)
+  );
+    DCR #(
+    .IS_POSEDGE(0),
+    .N(32)
+    ) addr_buffer (
+    .clk (clk_i),
+    .EN  (1'b1),
+    .RST_N (rst_ni),
+    .D   (addr_last_pip),
+    .Q   (addr_last_q)
+  );
 
   // take care of misaligned words
-  always_comb begin
-    unique case (rdata_offset_q)
-      2'b00:   rdata_w_ext =  data_rdata_i[31:0];
-      2'b01:   rdata_w_ext = {data_rdata_i[ 7:0], rdata_q[31:8]};
-      2'b10:   rdata_w_ext = {data_rdata_i[15:0], rdata_q[31:16]};
-      2'b11:   rdata_w_ext = {data_rdata_i[23:0], rdata_q[31:24]};
-      default: rdata_w_ext =  data_rdata_i[31:0];
-    endcase
-  end
+  logic [31:0] rdata_w_00_blind, rdata_w_01_blind, rdata_w_10_blind, rdata_w_11_blind;
+  AND_gate #(.N(32)) u_rdata_w_00_blind (.A1( data_rdata_i[31:0]),                  .A2({32{rdata_offset_oh_dcr[0]}}), .ZN(rdata_w_00_blind));
+  AND_gate #(.N(32)) u_rdata_w_01_blind (.A1({data_rdata_i[ 7:0], rdata_q[31 :8]}), .A2({32{rdata_offset_oh_dcr[1]}}), .ZN(rdata_w_01_blind));
+  AND_gate #(.N(32)) u_rdata_w_10_blind (.A1({data_rdata_i[15:0], rdata_q[31:16]}), .A2({32{rdata_offset_oh_dcr[2]}}), .ZN(rdata_w_10_blind));
+  AND_gate #(.N(32)) u_rdata_w_11_blind (.A1({data_rdata_i[23:0], rdata_q[31:24]}), .A2({32{rdata_offset_oh_dcr[3]}}), .ZN(rdata_w_11_blind));
+  assign rdata_w_ext = rdata_w_00_blind | rdata_w_01_blind | rdata_w_10_blind | rdata_w_11_blind;
 
   ////////////////////
   // Sign extension //
   ////////////////////
 
   // sign extension for half words
-  always_comb begin
-    unique case (rdata_offset_q)
-      2'b00: begin
-        if (!data_sign_ext_q) begin
-          rdata_h_ext = {16'h0000, data_rdata_i[15:0]};
-        end else begin
-          rdata_h_ext = {{16{data_rdata_i[15]}}, data_rdata_i[15:0]};
-        end
-      end
+  logic [7:0] sel_h_oh;
+  AND_gate #(.N(1)) u_sel_h_00_u (.A1(rdata_offset_oh_dcr[0]), .A2(data_sign_ext_oh_dcr[0]), .ZN(sel_h_oh[0]));
+  AND_gate #(.N(1)) u_sel_h_00_s (.A1(rdata_offset_oh_dcr[0]), .A2(data_sign_ext_oh_dcr[1]), .ZN(sel_h_oh[1]));
+  AND_gate #(.N(1)) u_sel_h_01_u (.A1(rdata_offset_oh_dcr[1]), .A2(data_sign_ext_oh_dcr[0]), .ZN(sel_h_oh[2]));
+  AND_gate #(.N(1)) u_sel_h_01_s (.A1(rdata_offset_oh_dcr[1]), .A2(data_sign_ext_oh_dcr[1]), .ZN(sel_h_oh[3]));
+  AND_gate #(.N(1)) u_sel_h_10_u (.A1(rdata_offset_oh_dcr[2]), .A2(data_sign_ext_oh_dcr[0]), .ZN(sel_h_oh[4]));
+  AND_gate #(.N(1)) u_sel_h_10_s (.A1(rdata_offset_oh_dcr[2]), .A2(data_sign_ext_oh_dcr[1]), .ZN(sel_h_oh[5]));
+  AND_gate #(.N(1)) u_sel_h_11_u (.A1(rdata_offset_oh_dcr[3]), .A2(data_sign_ext_oh_dcr[0]), .ZN(sel_h_oh[6]));
+  AND_gate #(.N(1)) u_sel_h_11_s (.A1(rdata_offset_oh_dcr[3]), .A2(data_sign_ext_oh_dcr[1]), .ZN(sel_h_oh[7]));
 
-      2'b01: begin
-        if (!data_sign_ext_q) begin
-          rdata_h_ext = {16'h0000, data_rdata_i[23:8]};
-        end else begin
-          rdata_h_ext = {{16{data_rdata_i[23]}}, data_rdata_i[23:8]};
-        end
-      end
-
-      2'b10: begin
-        if (!data_sign_ext_q) begin
-          rdata_h_ext = {16'h0000, data_rdata_i[31:16]};
-        end else begin
-          rdata_h_ext = {{16{data_rdata_i[31]}}, data_rdata_i[31:16]};
-        end
-      end
-
-      2'b11: begin
-        if (!data_sign_ext_q) begin
-          rdata_h_ext = {16'h0000, data_rdata_i[7:0], rdata_q[31:24]};
-        end else begin
-          rdata_h_ext = {{16{data_rdata_i[7]}}, data_rdata_i[7:0], rdata_q[31:24]};
-        end
-      end
-
-      default: rdata_h_ext = {16'h0000, data_rdata_i[15:0]};
-    endcase // case (rdata_offset_q)
-  end
+  logic [31:0] rdata_h_blind [8];
+  AND_gate #(.N(32)) u_rdata_h_00_u_blind (.A1({16'h0000, data_rdata_i[15:0]}),           .A2({32{sel_h_oh[0]}}), .ZN(rdata_h_blind[0]));
+  AND_gate #(.N(32)) u_rdata_h_00_s_blind (.A1({{16{data_rdata_i[15]}}, data_rdata_i[15:0]}), .A2({32{sel_h_oh[1]}}), .ZN(rdata_h_blind[1]));
+  AND_gate #(.N(32)) u_rdata_h_01_u_blind (.A1({16'h0000, data_rdata_i[23:8]}),            .A2({32{sel_h_oh[2]}}), .ZN(rdata_h_blind[2]));
+  AND_gate #(.N(32)) u_rdata_h_01_s_blind (.A1({{16{data_rdata_i[23]}}, data_rdata_i[23:8]}),  .A2({32{sel_h_oh[3]}}), .ZN(rdata_h_blind[3]));
+  AND_gate #(.N(32)) u_rdata_h_10_u_blind (.A1({16'h0000, data_rdata_i[31:16]}),           .A2({32{sel_h_oh[4]}}), .ZN(rdata_h_blind[4]));
+  AND_gate #(.N(32)) u_rdata_h_10_s_blind (.A1({{16{data_rdata_i[31]}}, data_rdata_i[31:16]}), .A2({32{sel_h_oh[5]}}), .ZN(rdata_h_blind[5]));
+  AND_gate #(.N(32)) u_rdata_h_11_u_blind (.A1({16'h0000, data_rdata_i[7:0], rdata_q[31:24]}), .A2({32{sel_h_oh[6]}}), .ZN(rdata_h_blind[6]));
+  AND_gate #(.N(32)) u_rdata_h_11_s_blind (.A1({{16{data_rdata_i[7]}}, data_rdata_i[7:0], rdata_q[31:24]}), .A2({32{sel_h_oh[7]}}), .ZN(rdata_h_blind[7]));
+  assign rdata_h_ext = rdata_h_blind[0] | rdata_h_blind[1] | rdata_h_blind[2] | rdata_h_blind[3] |
+                       rdata_h_blind[4] | rdata_h_blind[5] | rdata_h_blind[6] | rdata_h_blind[7];
 
   // sign extension for bytes
-  always_comb begin
-    unique case (rdata_offset_q)
-      2'b00: begin
-        if (!data_sign_ext_q) begin
-          rdata_b_ext = {24'h00_0000, data_rdata_i[7:0]};
-        end else begin
-          rdata_b_ext = {{24{data_rdata_i[7]}}, data_rdata_i[7:0]};
-        end
-      end
+  logic [7:0] sel_b_oh;
+  AND_gate #(.N(1)) u_sel_b_00_u (.A1(rdata_offset_oh_dcr[0]), .A2(data_sign_ext_oh_dcr[0]), .ZN(sel_b_oh[0]));
+  AND_gate #(.N(1)) u_sel_b_00_s (.A1(rdata_offset_oh_dcr[0]), .A2(data_sign_ext_oh_dcr[1]), .ZN(sel_b_oh[1]));
+  AND_gate #(.N(1)) u_sel_b_01_u (.A1(rdata_offset_oh_dcr[1]), .A2(data_sign_ext_oh_dcr[0]), .ZN(sel_b_oh[2]));
+  AND_gate #(.N(1)) u_sel_b_01_s (.A1(rdata_offset_oh_dcr[1]), .A2(data_sign_ext_oh_dcr[1]), .ZN(sel_b_oh[3]));
+  AND_gate #(.N(1)) u_sel_b_10_u (.A1(rdata_offset_oh_dcr[2]), .A2(data_sign_ext_oh_dcr[0]), .ZN(sel_b_oh[4]));
+  AND_gate #(.N(1)) u_sel_b_10_s (.A1(rdata_offset_oh_dcr[2]), .A2(data_sign_ext_oh_dcr[1]), .ZN(sel_b_oh[5]));
+  AND_gate #(.N(1)) u_sel_b_11_u (.A1(rdata_offset_oh_dcr[3]), .A2(data_sign_ext_oh_dcr[0]), .ZN(sel_b_oh[6]));
+  AND_gate #(.N(1)) u_sel_b_11_s (.A1(rdata_offset_oh_dcr[3]), .A2(data_sign_ext_oh_dcr[1]), .ZN(sel_b_oh[7]));
 
-      2'b01: begin
-        if (!data_sign_ext_q) begin
-          rdata_b_ext = {24'h00_0000, data_rdata_i[15:8]};
-        end else begin
-          rdata_b_ext = {{24{data_rdata_i[15]}}, data_rdata_i[15:8]};
-        end
-      end
-
-      2'b10: begin
-        if (!data_sign_ext_q) begin
-          rdata_b_ext = {24'h00_0000, data_rdata_i[23:16]};
-        end else begin
-          rdata_b_ext = {{24{data_rdata_i[23]}}, data_rdata_i[23:16]};
-        end
-      end
-
-      2'b11: begin
-        if (!data_sign_ext_q) begin
-          rdata_b_ext = {24'h00_0000, data_rdata_i[31:24]};
-        end else begin
-          rdata_b_ext = {{24{data_rdata_i[31]}}, data_rdata_i[31:24]};
-        end
-      end
-
-      default: rdata_b_ext = {24'h00_0000, data_rdata_i[7:0]};
-    endcase // case (rdata_offset_q)
-  end
+  logic [31:0] rdata_b_blind [8];
+  AND_gate #(.N(32)) u_rdata_b_00_u_blind (.A1({24'h00_0000, data_rdata_i[7:0]}),           .A2({32{sel_b_oh[0]}}), .ZN(rdata_b_blind[0]));
+  AND_gate #(.N(32)) u_rdata_b_00_s_blind (.A1({{24{data_rdata_i[7]}}, data_rdata_i[7:0]}),   .A2({32{sel_b_oh[1]}}), .ZN(rdata_b_blind[1]));
+  AND_gate #(.N(32)) u_rdata_b_01_u_blind (.A1({24'h00_0000, data_rdata_i[15:8]}),          .A2({32{sel_b_oh[2]}}), .ZN(rdata_b_blind[2]));
+  AND_gate #(.N(32)) u_rdata_b_01_s_blind (.A1({{24{data_rdata_i[15]}}, data_rdata_i[15:8]}),  .A2({32{sel_b_oh[3]}}), .ZN(rdata_b_blind[3]));
+  AND_gate #(.N(32)) u_rdata_b_10_u_blind (.A1({24'h00_0000, data_rdata_i[23:16]}),         .A2({32{sel_b_oh[4]}}), .ZN(rdata_b_blind[4]));
+  AND_gate #(.N(32)) u_rdata_b_10_s_blind (.A1({{24{data_rdata_i[23]}}, data_rdata_i[23:16]}), .A2({32{sel_b_oh[5]}}), .ZN(rdata_b_blind[5]));
+  AND_gate #(.N(32)) u_rdata_b_11_u_blind (.A1({24'h00_0000, data_rdata_i[31:24]}),         .A2({32{sel_b_oh[6]}}), .ZN(rdata_b_blind[6]));
+  AND_gate #(.N(32)) u_rdata_b_11_s_blind (.A1({{24{data_rdata_i[31]}}, data_rdata_i[31:24]}), .A2({32{sel_b_oh[7]}}), .ZN(rdata_b_blind[7]));
+  assign rdata_b_ext = rdata_b_blind[0] | rdata_b_blind[1] | rdata_b_blind[2] | rdata_b_blind[3] |
+                       rdata_b_blind[4] | rdata_b_blind[5] | rdata_b_blind[6] | rdata_b_blind[7];
 
   // select word, half word or byte sign extended version
-  always_comb begin
-    unique case (data_type_q)
-      2'b00:       data_rdata_ext = rdata_w_ext;
-      2'b01:       data_rdata_ext = rdata_h_ext;
-      2'b10,2'b11: data_rdata_ext = rdata_b_ext;
-      default:     data_rdata_ext = rdata_w_ext;
-    endcase // case (data_type_q)
-  end
+  logic [31:0] rdata_w_blind_mux, rdata_h_blind_mux, rdata_b_blind_mux;
+
+  AND_gate #(.N(32)) u_rdata_w_ext_blind (.A1(rdata_w_ext), .A2({32{data_type_oh_dcr[0]}}), .ZN(rdata_w_blind_mux));
+  AND_gate #(.N(32)) u_rdata_h_ext_blind (.A1(rdata_h_ext), .A2({32{data_type_oh_dcr[1]}}), .ZN(rdata_h_blind_mux));
+  AND_gate #(.N(32)) u_rdata_b_ext_blind (.A1(rdata_b_ext), .A2({32{data_type_oh_dcr[2]}}), .ZN(rdata_b_blind_mux));
+
+  assign data_rdata_ext = rdata_w_blind_mux | rdata_h_blind_mux | rdata_b_blind_mux;
 
   ///////////////////////////////
   // Read data integrity check //
@@ -486,20 +509,15 @@ module ibex_load_store_unit #(
 
   assign lsu_req_done_o = (lsu_req_i | (ls_fsm_cs != IDLE)) & (ls_fsm_ns == IDLE);
 
-  // registers for FSM
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      ls_fsm_cs           <= IDLE;
-      handle_misaligned_q <= '0;
-      pmp_err_q           <= '0;
-      lsu_err_q           <= '0;
-    end else begin
-      ls_fsm_cs           <= ls_fsm_ns;
-      handle_misaligned_q <= handle_misaligned_d;
-      pmp_err_q           <= pmp_err_d;
-      lsu_err_q           <= lsu_err_d;
-    end
-  end
+  // registers for FSM and error tracking
+  DFFE_cell #(.N(3 + 1 + 1 + 1)) u_fsm_regs (
+    .CK    (clk_i),
+    .D     ({ls_fsm_ns, handle_misaligned_d, pmp_err_d, lsu_err_d}),
+    .EN    (1'b1),
+    .RST_N (rst_ni),
+    .Q     ({ls_fsm_cs, handle_misaligned_q, pmp_err_q, lsu_err_q}),
+    .QN    ()
+  );
 
   /////////////
   // Outputs //
@@ -581,15 +599,14 @@ module ibex_load_store_unit #(
                                 fcov_mis_rvalid_1 && data_bus_err_i ? 1'b1                 : // set
                                                                       fcov_mis_bus_err_1_q ;
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      fcov_mis_2_en_q <= 1'b0;
-      fcov_mis_bus_err_1_q <= 1'b0;
-    end else begin
-      fcov_mis_2_en_q <= fcov_mis_2_en_d;
-      fcov_mis_bus_err_1_q <= fcov_mis_bus_err_1_d;
-    end
-  end
+  DFFE_cell #(.N(1 + 1)) u_fcov_regs (
+    .CK    (clk_i),
+    .D     ({fcov_mis_2_en_d, fcov_mis_bus_err_1_d}),
+    .EN    (1'b1),
+    .RST_N (rst_ni),
+    .Q     ({fcov_mis_2_en_q, fcov_mis_bus_err_1_q}),
+    .QN    ()
+  );
 `endif
 
   `DV_FCOV_SIGNAL(logic, ls_error_exception, (load_err_o | store_err_o) & ~pmp_err_q)

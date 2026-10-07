@@ -2,6 +2,8 @@
 // Copyright 2018 ETH Zurich and University of Bologna, see also CREDITS.md.
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
+// Modified 2026 by Niels Wieser, TU Darmstadt:
+// countermeasures against micro-architectural leakage.
 
 `ifdef RISCV_FORMAL
   `define RVFI
@@ -183,7 +185,7 @@ module ibex_core import ibex_pkg::*; #(
   logic        dummy_instr_id;
   logic        instr_valid_id;
   logic        instr_new_id;
-  logic [31:0] instr_rdata_id;                 // Instruction sampled inside IF stage
+  logic [31:0] instr_rdata_id_dcr;                 // Instruction sampled inside IF stage
   logic [31:0] instr_rdata_alu_id;             // Instruction sampled inside IF stage (replicated to
                                                // ease fan-out)
   logic [15:0] instr_rdata_c_id;               // Compressed instruction sampled inside IF stage
@@ -269,6 +271,7 @@ module ibex_core import ibex_pkg::*; #(
 
   // ALU Control
   alu_op_e     alu_operator_ex;
+  logic        can_skip_add;
   logic [31:0] alu_operand_a_ex;
   logic [31:0] alu_operand_b_ex;
 
@@ -473,7 +476,7 @@ module ibex_core import ibex_pkg::*; #(
     // outputs to ID stage
     .instr_valid_id_o        (instr_valid_id),
     .instr_new_id_o          (instr_new_id),
-    .instr_rdata_id_o        (instr_rdata_id),
+    .instr_rdata_id_dcr_o    (instr_rdata_id_dcr),
     .instr_rdata_alu_id_o    (instr_rdata_alu_id),
     .instr_rdata_c_id_o      (instr_rdata_c_id),
     .instr_is_compressed_id_o(instr_is_compressed_id),
@@ -570,7 +573,7 @@ module ibex_core import ibex_pkg::*; #(
 
     // from/to IF-ID pipeline register
     .instr_valid_i        (instr_valid_id),
-    .instr_rdata_i        (instr_rdata_id),
+    .instr_rdata_dcr_i    (instr_rdata_id_dcr),
     .instr_rdata_alu_i    (instr_rdata_alu_id),
     .instr_rdata_c_i      (instr_rdata_c_id),
     .instr_is_compressed_i(instr_is_compressed_id),
@@ -604,6 +607,7 @@ module ibex_core import ibex_pkg::*; #(
     .lsu_resp_valid_i(lsu_resp_valid),
 
     .alu_operator_ex_o (alu_operator_ex),
+    .can_skip_add_o    (can_skip_add),
     .alu_operand_a_ex_o(alu_operand_a_ex),
     .alu_operand_b_ex_o(alu_operand_b_ex),
 
@@ -728,6 +732,7 @@ module ibex_core import ibex_pkg::*; #(
 
     // ALU signal from ID stage
     .alu_operator_i         (alu_operator_ex),
+    .can_skip_add_i         (can_skip_add),
     .alu_operand_a_i        (alu_operand_a_ex),
     .alu_operand_b_i        (alu_operand_b_ex),
     .alu_instr_first_cycle_i(instr_first_cycle_id),
@@ -1797,7 +1802,7 @@ module ibex_core import ibex_pkg::*; #(
     if (instr_is_compressed_id && (instr_gets_expanded_id == INSTR_NOT_EXPANDED)) begin
       rvfi_insn_id = {16'b0, instr_rdata_c_id};
     end else begin
-      rvfi_insn_id = instr_rdata_id;
+      rvfi_insn_id = instr_rdata_alu_id;
     end
   end
 

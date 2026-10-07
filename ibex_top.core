@@ -2,6 +2,8 @@ CAPI=2:
 # Copyright lowRISC contributors.
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
+# Modified 2026 by Niels Wieser, TU Darmstadt:
+# countermeasures against micro-architectural leakage.
 name: "lowrisc:ibex:ibex_top:0.1"
 description: "Ibex, a small RV32 CPU core"
 
@@ -12,7 +14,7 @@ filesets:
       - lowrisc:ibex:ibex_core
       - lowrisc:prim:and2
       - lowrisc:prim:buf
-      - lowrisc:prim:clock_mux2
+      - lowrisc:prim_generic:clock_mux2
       - lowrisc:prim:count
       - lowrisc:prim:flop
       - lowrisc:prim:ram_1p_scr
@@ -20,8 +22,8 @@ filesets:
       - lowrisc:prim:onehot
     files:
       - rtl/ibex_register_file_ff.sv # generic FF-based
-      - rtl/ibex_register_file_fpga.sv # FPGA
-      - rtl/ibex_register_file_latch.sv # ASIC
+      #- rtl/ibex_register_file_fpga.sv # FPGA
+      #- rtl/ibex_register_file_latch.sv # ASIC
       - rtl/ibex_lockstep.sv
       - rtl/ibex_top.sv
     file_type: systemVerilogSource
@@ -164,6 +166,23 @@ targets:
     parameters:
       - SYNTHESIS=true
       - RVFI=true
+      - RV32E
+      - RV32M
+      - RV32B
+      - RegFile
+      - ICache
+      - ICacheECC
+      - BranchTargetALU
+      - WritebackStage
+      - SecureIbex
+      - PMPEnable
+      - PMPGranularity
+      - PMPNumRegions
+      - MHPMCounterNum
+      - MHPMCounterWidth
+      - ICacheScramble
+      - BranchPredictor
+      - DbgTriggerEn
     default_tool: verilator
     tools:
       verilator:

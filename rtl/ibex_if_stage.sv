@@ -2,6 +2,8 @@
 // Copyright 2018 ETH Zurich and University of Bologna, see also CREDITS.md.
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
+// Modified 2026 by Niels Wieser, TU Darmstadt:
+// countermeasures against micro-architectural leakage.
 
 /**
  * Instruction Fetch Stage
@@ -63,7 +65,7 @@ module ibex_if_stage import ibex_pkg::*; #(
   // output of ID stage
   output logic                        instr_valid_id_o,         // instr in IF-ID is valid
   output logic                        instr_new_id_o,           // instr in IF-ID is new
-  output logic [31:0]                 instr_rdata_id_o,         // instr for ID stage
+  output logic [31:0]                 instr_rdata_id_dcr_o,         // instr for ID stage
   output logic [31:0]                 instr_rdata_alu_id_o,     // replicated instr for ID stage
                                                                 // to reduce fan-out
   output logic [15:0]                 instr_rdata_c_id_o,       // compressed instr for ID stage
@@ -511,49 +513,47 @@ module ibex_if_stage import ibex_pkg::*; #(
   assign if_id_pipe_reg_we = instr_new_id_d;
 
   if (ResetAll) begin : g_instr_rdata_ra
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        instr_rdata_id_o         <= '0;
-        instr_rdata_alu_id_o     <= '0;
-        instr_fetch_err_o        <= '0;
-        instr_fetch_err_plus2_o  <= '0;
-        instr_rdata_c_id_o       <= '0;
-        instr_is_compressed_id_o <= '0;
-        instr_gets_expanded_id_o <= INSTR_NOT_EXPANDED;
-        instr_expanded_id_o      <= '0;
-        illegal_c_insn_id_o      <= '0;
-        pc_id_o                  <= '0;
-      end else if (if_id_pipe_reg_we) begin
-        instr_rdata_id_o         <= instr_out;
-        // To reduce fan-out and help timing from the instr_rdata_id flops they are replicated.
-        instr_rdata_alu_id_o     <= instr_out;
-        instr_fetch_err_o        <= instr_err_out;
-        instr_fetch_err_plus2_o  <= if_instr_err_plus2;
-        instr_rdata_c_id_o       <= if_instr_rdata[15:0];
-        instr_is_compressed_id_o <= instr_is_compressed_out;
-        instr_gets_expanded_id_o <= instr_gets_expanded_out;
-        instr_expanded_id_o      <= if_instr_rdata[15:0];
-        illegal_c_insn_id_o      <= illegal_c_instr_out;
-        pc_id_o                  <= pc_if_o;
-      end
-    end
+    DFFE_cell #(.N(32 + 1 + 1 + 16 + 1 + $bits(instr_exp_e) + 16 + 1 + 32)) u_if_id_pipe_regs (
+      .CK    (clk_i),
+      .D     ({instr_out, instr_err_out, if_instr_err_plus2, if_instr_rdata[15:0],
+               instr_is_compressed_out, instr_gets_expanded_out, if_instr_rdata[15:0],
+               illegal_c_instr_out, pc_if_o}),
+      .EN    (if_id_pipe_reg_we),
+      .RST_N (rst_ni),
+      .Q     ({instr_rdata_alu_id_o, instr_fetch_err_o, instr_fetch_err_plus2_o, instr_rdata_c_id_o,
+               instr_is_compressed_id_o, instr_gets_expanded_id_o, instr_expanded_id_o,
+               illegal_c_insn_id_o, pc_id_o}),
+      .QN    ()
+    );
   end else begin : g_instr_rdata_nr
-    always_ff @(posedge clk_i) begin
-      if (if_id_pipe_reg_we) begin
-        instr_rdata_id_o         <= instr_out;
-        // To reduce fan-out and help timing from the instr_rdata_id flops they are replicated.
-        instr_rdata_alu_id_o     <= instr_out;
-        instr_fetch_err_o        <= instr_err_out;
-        instr_fetch_err_plus2_o  <= if_instr_err_plus2;
-        instr_rdata_c_id_o       <= if_instr_rdata[15:0];
-        instr_is_compressed_id_o <= instr_is_compressed_out;
-        instr_gets_expanded_id_o <= instr_gets_expanded_out;
-        instr_expanded_id_o      <= if_instr_rdata[15:0];
-        illegal_c_insn_id_o      <= illegal_c_instr_out;
-        pc_id_o                  <= pc_if_o;
-      end
-    end
+    DFFE_cell #(.N(32 + 1 + 1 + 16 + 1 + $bits(instr_exp_e) + 16 + 1 + 32)) u_if_id_pipe_regs (
+      .CK    (clk_i),
+      .D     ({instr_out, instr_err_out, if_instr_err_plus2, if_instr_rdata[15:0],
+               instr_is_compressed_out, instr_gets_expanded_out, if_instr_rdata[15:0],
+               illegal_c_instr_out, pc_if_o}),
+      .EN    (if_id_pipe_reg_we),
+      .RST_N (1'b1),
+      .Q     ({instr_rdata_alu_id_o, instr_fetch_err_o, instr_fetch_err_plus2_o, instr_rdata_c_id_o,
+               instr_is_compressed_id_o, instr_gets_expanded_id_o, instr_expanded_id_o,
+               illegal_c_insn_id_o, pc_id_o}),
+      .QN    ()
+    );
   end
+
+  //Replace side-channel relevant registers with DCR modules.
+  DCR #(
+    .IS_POSEDGE(1),
+    .N(32)
+  ) dcr_id_input (
+    .clk(clk_i),
+    .EN(if_id_pipe_reg_we),
+    .RST_N(rst_ni),
+    .D(instr_out),
+    .Q(instr_rdata_id_dcr_o)
+  ); 
+  // Simulate DCR -> works
+  // The problem is the negedge refreshed control signal changing enable after falling edge.
+  // assign instr_rdata_id_dcr_o = instr_rdata_alu_id_o & {32{clk_i}};
 
   // Check for expected increments of the PC when security hardening enabled
   if (PCIncrCheck) begin : g_secure_pc

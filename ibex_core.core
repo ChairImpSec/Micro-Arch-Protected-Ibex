@@ -2,6 +2,8 @@ CAPI=2:
 # Copyright lowRISC contributors.
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
+# Modified 2026 by Niels Wieser, TU Darmstadt:
+# countermeasures against micro-architectural leakage.
 name: "lowrisc:ibex:ibex_core:0.1"
 description: "Ibex CPU Core Components"
 
@@ -9,7 +11,7 @@ filesets:
   files_rtl:
     depend:
       - lowrisc:prim:assert
-      - lowrisc:prim:clock_gating
+      - lowrisc:prim_generic:clock_gating
       - lowrisc:prim:lfsr
       - lowrisc:prim:mubi
       - lowrisc:ibex:ibex_pkg
@@ -176,6 +178,20 @@ targets:
     parameters:
       - SYNTHESIS=true
       - RVFI=true
+      - RV32E
+      - RV32M
+      - RV32B
+      - RegFile
+      - ICache
+      - ICacheECC
+      - BranchTargetALU
+      - WritebackStage
+      - SecureIbex
+      - PMPEnable
+      - PMPGranularity
+      - PMPNumRegions
+      - MHPMCounterNum
+      - MHPMCounterWidth
     default_tool: verilator
     tools:
       verilator:

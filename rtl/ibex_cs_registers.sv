@@ -2,6 +2,8 @@
 // Copyright 2018 ETH Zurich and University of Bologna, see also CREDITS.md.
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
+// Modified 2026 by Niels Wieser, TU Darmstadt:
+// countermeasures against micro-architectural leakage.
 
 /**
  * Control and Status Registers
@@ -941,18 +943,41 @@ module ibex_cs_registers import ibex_pkg::*; #(
   );
 
   // MTVAL
-  ibex_csr #(
-    .Width     (32),
-    .ShadowCopy(1'b0),
-    .ResetValue('0)
-  ) u_mtval_csr (
-    .clk_i     (clk_i),
-    .rst_ni    (rst_ni),
-    .wr_data_i (mtval_d),
-    .wr_en_i   (mtval_en),
-    .rd_data_o (mtval_q),
-    .rd_error_o()
+  // ibex_csr #(
+  //   .Width     (32),
+  //   .ShadowCopy(1'b0),
+  //   .ResetValue('0)
+  // ) u_mtval_csr (
+  //   .clk_i     (clk_i),
+  //   .rst_ni    (rst_ni),
+  //   .wr_data_i (mtval_d),
+  //   .wr_en_i   (mtval_en),
+  //   .rd_data_o (mtval_q),
+  //   .rd_error_o()
+  // );
+
+
+  logic [31:0] mtval_dcr;
+  DCR #(
+    .IS_POSEDGE(1),
+    .N(32) 
+  ) dcr_mtval (
+    .clk   (clk_i),
+    .EN    (mtval_en),
+    .RST_N (rst_ni),
+    .D     (mtval_d),
+    .Q     (mtval_dcr)
   );
+    DCR #(
+    .IS_POSEDGE(0),
+    .N(32) 
+    ) buffer_mtval (
+    .clk   (clk_i),
+    .EN    (mtval_en),
+    .RST_N (rst_ni),
+    .D     (mtval_dcr),
+    .Q     (mtval_q)
+  );   
 
   // MTVEC
   ibex_csr #(
